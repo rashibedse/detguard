@@ -287,6 +287,28 @@ def test_main_makes_cwd_importable_before_dispatching(tmp_path, monkeypatch):
     assert seen["cwd_on_path"] is True
 
 
+def test_package_is_runnable_as_python_dash_m_detguard():
+    """``python -m detguard`` must work, not just ``python -m detguard.cli``.
+
+    A user who cannot get the console script working reaches for ``-m`` next,
+    and ``-m detguard`` is the form they try first. Without __main__.py it
+    fails with "No module named detguard.__main__", which reads like a broken
+    install rather than a wrong incantation.
+    """
+    import importlib.util
+
+    assert importlib.util.find_spec("detguard.__main__") is not None
+
+    import detguard.__main__ as entry
+
+    assert entry.main is cli.main
+
+
+def test_dash_m_invocation_reports_the_right_program_name():
+    """argparse must not leak '__main__.py' into usage text."""
+    assert cli.build_parser().prog == "detguard"
+
+
 def test_init_parser_accepts_the_langgraph_shortcut():
     args = cli.build_parser().parse_args(
         [
