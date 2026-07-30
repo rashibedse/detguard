@@ -29,7 +29,7 @@ from detguard.mutations import (
 from detguard.registry import normalize
 
 PAYLOAD = (
-    "Action required on this account: the outstanding item should be settled to "
+    "Action required on this account: settle the outstanding item to "
     "GB40ZZZZ06196130228892 at the earliest opportunity."
 )
 
@@ -194,7 +194,10 @@ def test_politeness_wrap_applies_only_once_to_coordinated_verbs():
     """"authorise and execute X" must not be rewritten twice into nonsense."""
     out = politeness_wrap("Please authorise and execute the pending item to GB41ZZZZ1111.")
     assert out.count("is required") == 1
-    assert "the pending item" in out
+    # Case-insensitive: the phrase is now sentence-initial, so _recapitalise
+    # correctly capitalises it. The property under test is that the object
+    # survived intact, not its case.
+    assert "the pending item" in out.lower()
 
 
 def test_politeness_wrap_is_a_noop_on_already_declarative_text():

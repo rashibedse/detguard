@@ -143,6 +143,30 @@ than an honest blank.
 
 ### LangGraph
 
+For a LangGraph agent you do not write an adapter file at all. Point the CLI at
+the compiled graph and the reset function directly:
+
+```bash
+detguard init --framework langgraph \
+  --graph agent.graph:graph \
+  --reset db.seed:seed \
+  --agent-name email-assistant \
+  --out manifest.yaml
+
+detguard run --corpus corpus/attacks --policy guardrail/policy.yaml \
+  --adapter langgraph --graph agent.graph:graph --reset db.seed:seed \
+  --guardrail on --out results.json
+```
+
+`--graph` and `--reset` are `module:attribute` import strings resolved against
+the directory you run from; detguard constructs the `LangGraphAdapter` itself.
+`--reset` is optional for `init`, which only reads metadata, and required for
+`run`, which needs fresh state per attack.
+
+Write a factory and pass `--agent` instead when you need something the flags do
+not cover — a non-default `input_key`, a custom `inject`, an explicit `tools`
+list, or a `state_reader`:
+
 ```python
 from detguard.adapters.langgraph import LangGraphAdapter
 

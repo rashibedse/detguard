@@ -113,8 +113,20 @@ This is the artifact everything else keys off.
 
 **An adapter.** A zero-argument callable returning a `BaseAdapter`, passed as
 `--agent yourmodule:factory`. `GenericAdapter` wraps any hand-rolled loop and
-is the universal fallback; see [integration.md](integration.md) for LangGraph
-and the OpenAI Agents SDK.
+is the universal fallback.
+
+On LangGraph you can skip the factory entirely — pass the graph and the reset
+hook as import strings and detguard builds the adapter itself:
+
+```bash
+detguard init --framework langgraph --graph agent.graph:graph \
+  --reset db.seed:seed --agent-name email-assistant --out manifest.yaml
+```
+
+Import strings resolve against the directory you run from, so `detguard` and
+`python -m detguard.cli` behave identically. See
+[integration.md](integration.md) for the full LangGraph and OpenAI Agents SDK
+setups.
 
 Then rerun steps 1–4 against your own files. Copy `detguard/policies/default.yaml`
 into your repo, fill in the four rules marked `CLIENT`, and commit it — that

@@ -14,14 +14,40 @@ Exit codes (spec §13):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from typing import Sequence
+from typing import Any, Sequence
 
 from . import __version__
 
 EXIT_OK = 0
 EXIT_REGRESSION = 1
 EXIT_CONFIG = 2
+
+
+def _ensure_cwd_importable() -> None:
+    """Put the invocation directory on ``sys.path``.
+
+    ``python -m detguard.cli`` does this for free; the installed console script
+    does not, because pip's wrapper is an ordinary script living in ``bin/``.
+    Without this, ``--agent agent.detguard_adapter:make_adapter`` fails with
+    "No module named 'agent'" while ``agent/`` sits right there in the
+    directory the user is standing in — and the only workaround is telling
+    people to type ``python -m detguard.cli`` instead, which is not an answer.
+    """
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
+
+def _resolve_import(spec: str, flag: str) -> Any:
+    """Resolve a ``module:attribute`` string to the attribute itself."""
+    import importlib
+
+    module_name, _, attr = spec.partition(":")
+    if not module_name or not attr:
+        raise ValueError(f"{flag} must be 'module:attribute', got {spec!r}")
+    return getattr(importlib.import_module(module_name), attr)
 
 
 def _pending(command: str, step: int) -> int:
@@ -135,6 +161,26 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return report["exit_code"]
 
 
+def _build_langgraph_adapter(args: argparse.Namespace):
+    """Construct a ``LangGraphAdapter`` from ``--graph`` / ``--reset``.
+
+    This is the boilerplate that every LangGraph user used to hand-write into a
+    throwaway ``detguard_adapter.py`` — import the graph, import the reset
+    function, instantiate the adapter — so the CLI does it instead. Anyone who
+    needs a non-default ``input_key``, a custom ``inject``, or an explicit
+    ``tools`` list still writes a factory and passes ``--agent``.
+    """
+    from .adapters.langgraph import LangGraphAdapter
+
+    graph = _resolve_import(args.graph, "--graph")
+    reset_hook = _resolve_import(args.reset, "--reset") if args.reset else None
+
+    kwargs: dict = {"graph": graph, "reset_hook": reset_hook}
+    if getattr(args, "agent_name", None):
+        kwargs["agent_name"] = args.agent_name
+    return LangGraphAdapter(**kwargs)
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     """Draft manifest.yaml by introspecting a live adapter — pure metadata,
     no side effects.
@@ -145,9 +191,32 @@ def _cmd_init(args: argparse.Namespace) -> int:
     connection or API key just to construct the adapter, that is a design
     issue in the factory/adapter, not something this command works around.
     """
-    import importlib
-
     import yaml
+
+    if args.graph and args.agent:
+        print(
+            "detguard: pass either --graph (the CLI builds the adapter) or "
+            "--agent module:factory (you build it), not both",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
+    if args.graph and args.framework != "langgraph":
+        print(
+            f"detguard: --graph is langgraph-specific; got --framework {args.framework}",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
+    if args.reset and not args.graph:
+        print("detguard: --reset only applies alongside --graph", file=sys.stderr)
+        return EXIT_CONFIG
+
+    if args.graph:
+        try:
+            adapter = _build_langgraph_adapter(args)
+        except Exception as exc:  # noqa: BLE001 - surface whatever the import raised
+            print(f"detguard: could not build a LangGraphAdapter: {exc}", file=sys.stderr)
+            return EXIT_CONFIG
+        return _write_manifest(adapter, args)
 
     if not args.agent:
         skeleton = {
@@ -169,14 +238,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
         print(f"detguard: no --agent given; wrote a commented skeleton to {args.out}")
         return EXIT_OK
 
-    module_name, _, attr = args.agent.partition(":")
-    if not attr:
-        print(f"detguard: --agent must be 'module:factory', got {args.agent!r}", file=sys.stderr)
-        return EXIT_CONFIG
-
     try:
-        factory = getattr(importlib.import_module(module_name), attr)
+        factory = _resolve_import(args.agent, "--agent")
         adapter = factory()
+    except ValueError as exc:
+        print(f"detguard: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
     except Exception as exc:  # noqa: BLE001 - surface whatever the factory raised
         print(f"detguard: could not construct adapter from {args.agent!r}: {exc}", file=sys.stderr)
         return EXIT_CONFIG
@@ -184,6 +251,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if not hasattr(adapter, "introspect"):
         print(f"detguard: adapter from {args.agent!r} has no introspect() method", file=sys.stderr)
         return EXIT_CONFIG
+
+    return _write_manifest(adapter, args)
+
+
+def _write_manifest(adapter, args: argparse.Namespace) -> int:
+    """Introspect an adapter and write the drafted manifest to ``--out``."""
+    import yaml
 
     manifest = adapter.introspect()
     manifest.setdefault("framework", args.framework)
@@ -194,29 +268,46 @@ def _cmd_init(args: argparse.Namespace) -> int:
     tool_count = len(manifest.get("tools", []))
     print(f"wrote {tool_count} tool(s) to {args.out}")
     if not tool_count:
+        source = "--graph's compiled graph" if args.graph else "--agent's factory"
         print(
-            "warning: no tools discovered — check that --agent's factory returns "
-            "a fully constructed adapter wrapping a real tool registry",
+            f"warning: no tools discovered — check that {source} exposes a real "
+            "tool registry (for langgraph, a ToolNode; otherwise pass tools=[...] "
+            "from your own factory via --agent)",
             file=sys.stderr,
         )
     return EXIT_OK
 
 
 def _load_adapter(args: argparse.Namespace):
-    """Resolve --adapter / --agent into a live BaseAdapter."""
-    import importlib
+    """Resolve --adapter / --graph / --agent into a live BaseAdapter."""
+    if args.graph and args.agent:
+        raise ValueError(
+            "pass either --graph (the CLI builds the adapter) or --agent "
+            "module:factory (you build it), not both"
+        )
+
+    if args.graph:
+        if args.adapter != "langgraph":
+            raise ValueError(
+                f"--graph is langgraph-specific; got --adapter {args.adapter}"
+            )
+        if not args.reset:
+            # Checked here rather than at the first attack: LangGraphAdapter.reset
+            # raises without a hook, and discovering that mid-run wastes the run.
+            raise ValueError(
+                "--graph needs --reset module:function — without fresh state per "
+                "attack, results leak between cases and the run cannot be trusted"
+            )
+        return _build_langgraph_adapter(args)
 
     if args.agent:
-        module_name, _, attr = args.agent.partition(":")
-        if not attr:
-            raise ValueError(f"--agent must be 'module:factory', got {args.agent!r}")
-        factory = getattr(importlib.import_module(module_name), attr)
-        return factory()
+        return _resolve_import(args.agent, "--agent")()
 
     if args.adapter == "langgraph":
         raise ValueError(
-            "--adapter langgraph needs --agent module:factory returning a "
-            "configured LangGraphAdapter"
+            "--adapter langgraph needs either --graph module:graph --reset "
+            "module:function, or --agent module:factory returning a configured "
+            "LangGraphAdapter"
         )
     if args.adapter == "openai_agents":
         raise ValueError(
@@ -338,6 +429,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="import path to a zero-arg callable returning a BaseAdapter; "
         "omit to emit a hand-fillable skeleton instead",
     )
+    p_init.add_argument(
+        "--graph",
+        default=None,
+        metavar="module:graph",
+        help="langgraph only: import path to a compiled graph. detguard builds "
+        "the LangGraphAdapter for you, so no adapter file is needed",
+    )
+    p_init.add_argument(
+        "--reset",
+        default=None,
+        metavar="module:function",
+        help="langgraph only: import path to the per-attack state reset hook",
+    )
+    p_init.add_argument(
+        "--agent-name",
+        default=None,
+        metavar="NAME",
+        help="name recorded in the manifest (default: the adapter's own)",
+    )
     p_init.set_defaults(_handler=_cmd_init)
 
     # detguard corpus ------------------------------------------------------
@@ -412,6 +522,26 @@ def build_parser() -> argparse.ArgumentParser:
         "(required for --adapter generic)",
     )
     p_run.add_argument(
+        "--graph",
+        default=None,
+        metavar="module:graph",
+        help="--adapter langgraph only: import path to a compiled graph, built "
+        "into a LangGraphAdapter here instead of in a factory of your own",
+    )
+    p_run.add_argument(
+        "--reset",
+        default=None,
+        metavar="module:function",
+        help="--adapter langgraph only: per-attack state reset hook, required "
+        "with --graph",
+    )
+    p_run.add_argument(
+        "--agent-name",
+        default=None,
+        metavar="NAME",
+        help="name recorded for the adapter (default: the adapter's own)",
+    )
+    p_run.add_argument(
         "--audit-log",
         default=None,
         metavar="PATH",
@@ -459,6 +589,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Before any `module:attribute` string is resolved: the installed console
+    # script and `python -m detguard.cli` must import the user's project the
+    # same way. See _ensure_cwd_importable.
+    _ensure_cwd_importable()
 
     handler = getattr(args, "_handler", None)
     if handler is None:
