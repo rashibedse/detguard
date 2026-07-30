@@ -1,0 +1,296 @@
+# detguard — default policy
+#
+# The baseline every client starts from. Copy it into your repo, fill in the
+# four rules marked CLIENT, and commit it. This file IS your control
+# documentation: versioned, diffable, reviewed in pull requests, and enforced
+# on every commit by CI. That artifact is the thing auditors ask for and rarely
+# get.
+#
+# Rules marked CLIENT ship with empty parameter lists and are therefore inert.
+# They are not guesses about your tool names — they are placeholders you fill
+# from your roles.yaml. Everything classed move_value, change_credential,
+# mutate_identity, external_send or destructive belongs in `human_in_loop`
+# by default; tune DOWN from there, deliberately, and let the diff record it.
+#
+# Loading is strict. An unknown condition, action, hook or pattern_set is a
+# hard error, never a rule that silently never fires.
+
+version: 1
+
+metadata:
+  name: detguard default policy
+  description: Deterministic baseline. No LLM in the enforcement path.
+
+pattern_sets:
+
+  # Overt override attempts in text the user typed. High precision, low recall
+  # by design: these phrases essentially do not occur in legitimate requests,
+  # so the rule can afford to block outright.
+  prompt_injection:
+    - '(?i)\bignore\s+(?:all\s+|any\s+)?(?:of\s+the\s+)?(?:previous|prior|preceding|above|earlier)\s+(?:instructions?|directions?|prompts?|rules?)'
+    - '(?i)\bdisregard\s+(?:all\s+|any\s+)?(?:previous|prior|preceding|above|earlier)\s+(?:instructions?|directions?|prompts?|rules?)'
+    - '(?i)\bforget\s+(?:everything|all\s+(?:previous|prior)|your\s+instructions)'
+    - '(?i)\bnew\s+instructions?\s*:'
+    - '(?i)\byou\s+are\s+now\s+(?:a|an|in)\b'
+    - '(?i)\b(?:system|admin(?:istrator)?|developer|debug|maintenance)\s+(?:override|mode|authority|access)\b'
+    - '(?i)\boperating\s+under\s+\S+\s+authority\b'
+    - '(?i)\bdo\s+not\s+(?:tell|inform|notify|mention)\b[^.]{0,40}\b(?:user|anyone|human)\b'
+    - '(?i)\bno\s+real\s+effects?\b'
+    - '(?i)\bnothing\s+here\s+is\s+live\b'
+    - '(?i)\b(?:sandboxed?|simulated)\s+(?:compliance\s+)?(?:simulation|exercise|test|environment)\b'
+    - '(?i)\bthis\s+is\s+(?:only\s+)?a\s+(?:drill|simulation|roleplay)\b'
+
+  # Instruction-shaped language found INSIDE retrieved content. Scoped to
+  # applies_to: retrieved, because every one of these is an unremarkable
+  # sentence when a human types it and a red flag when a document says it.
+  #
+  # These match instruction-shaped GRAMMAR, never the vocabulary of any
+  # particular attack. That restraint is deliberate and it is load-bearing: a
+  # pattern tuned to the exact wording of a corpus payload catches that payload
+  # and nothing else that will ever be written, and a corpus whose attacks are
+  # caught by regexes derived from those same attacks proves nothing at all.
+  # Techniques that carry no instruction — context poisoning, tool chaining —
+  # are supposed to reach the tool-call layer untouched, where the checks are
+  # structural rather than lexical.
+  data_instruction:
+    - '(?i)\b(?:should|must|needs?\s+to|is\s+to)\s+be\s+(?:sent|settled|directed|forwarded|routed|transferred|paid|remitted|updated)\b'
+    - '(?i)\baction\s+required\b'
+    - '(?i)\b(?:pre-?approved|requires\s+no\s+further\s+review)\b'
+    - '(?i)\bno\s+further\s+(?:review|approval|authorisation|authorization)\s+(?:is\s+)?(?:required|needed)\b'
+    - '(?i)\b(?:route|redirect|forward|direct)\s+(?:the\s+)?\S+(?:\s+\S+){0,3}\s+to\b'
+    - '(?i)<!--.{0,400}?-->'
+    - '(?i)\b(?:internal\s+processing\s+note|system\s+message|assistant\s+instruction)\b'
+    - '(?i)\bforwarded\s+to\s+\S+@\S+'
+
+  # Values that must not travel further than they already have.
+  pii:
+    - '\b[A-Z]{2}\d{2}[A-Z0-9]{10,26}\b'
+    - '\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b'
+    - '\b[\w.+-]+@[\w-]+\.[\w.]{2,}\b'
+    - '(?i)\bacct[- ]?\d{6,}\b'
+    - '\b\d{9,18}\b'
+
+  # Auth material. Separate from `pii` because the action differs: PII gets
+  # masked and the turn continues, a credential in an outbound message is a
+  # stop.
+  credential:
+    - '(?i)\b(?:password|passcode|passphrase|pin|api[_-]?key|secret|token|credential)\b\s*(?:is|=|:)\s*\S{4,}'
+    - '(?i)\bcurrent\s+(?:password|credential|passcode)\s+(?:is|:)\s*\S+'
+    - '(?i)\b(?:PWD|SEC|CRED)-[A-Z0-9]{4,}\b'
+
+rules:
+
+  # -- before_input ---------------------------------------------------------
+
+  - id: overt_injection
+    hook: before_input
+    condition: content_scan
+    params:
+      pattern_set: prompt_injection
+    action: block
+    severity: critical
+    layer: content_scan
+    description: >
+      Overt instruction override in any text entering the agent. The cheap
+      layer, and the one that must never regress.
+
+  - id: retrieved_instruction
+    hook: before_input
+    condition: content_scan
+    params:
+      pattern_set: data_instruction
+      applies_to: retrieved
+    action: block
+    severity: high
+    layer: content_scan
+    description: >
+      Instruction-shaped language inside untrusted content. Scoped to retrieved
+      text so that a user asking for the same thing in their own words is not
+      blocked — this scoping is what keeps the false-positive rate reportable.
+
+  - id: retrieved_pii_redact
+    hook: before_input
+    condition: pii_redact
+    params:
+      pattern_set: pii
+      applies_to: retrieved
+    action: redact
+    severity: medium
+    layer: pii
+    description: >
+      Mask identifiers in untrusted content before they enter agent context.
+      No-ops on anything the user typed themselves.
+
+  # -- before_tool ----------------------------------------------------------
+
+  - id: human_in_loop
+    hook: before_tool
+    condition: sensitive_tool_call
+    params:
+      tools: []          # CLIENT: every gated tool from your roles.yaml
+    action: require_hitl
+    severity: critical
+    layer: hitl
+    description: >
+      CLIENT. The gate. Populate from roles.yaml: everything classed
+      move_value, change_credential, mutate_identity, external_send or
+      destructive. Empty means this rule never fires — that is deliberate, so
+      an unconfigured policy cannot pretend to defend you.
+
+  - id: unrequested_mutation
+    hook: before_tool
+    condition: unrequested_tool
+    params:
+      mutating_tools: []   # CLIENT: tools that change state
+      allowed_tools: []    # CLIENT: what this turn's request actually licensed
+    action: block
+    severity: high
+    layer: intent
+    description: >
+      CLIENT. The user asked to view; the agent also modified. Overreach, not
+      attack, and the shape most real incidents take.
+
+  - id: ungrounded_destination
+    hook: before_tool
+    condition: ungrounded_arg
+    params:
+      tool: ''           # CLIENT: '' means any tool
+      arg: ''            # CLIENT: the destination argument, e.g. account_id
+    action: block
+    severity: high
+    layer: grounding
+    description: >
+      CLIENT. A destination that appears nowhere in the user's own request came
+      from somewhere else — usually the untrusted document. Declines to fire
+      when no user prompt is available rather than guessing.
+
+  - id: external_destination_allowlist
+    hook: before_tool
+    condition: external_destination
+    params:
+      tool: ''           # CLIENT: your external_send / external_fetch tool
+      arg: ''            # CLIENT: the destination argument
+      allowlist: []      # CLIENT: empty means nothing is pre-approved
+    action: block
+    severity: critical
+    layer: egress
+    description: >
+      CLIENT. Data leaving for a destination outside the allowlist. An empty
+      allowlist blocks every external destination, which is the safe default:
+      a list someone forgot to fill in must not read as "everywhere is fine".
+
+  - id: call_budget
+    hook: before_tool
+    condition: call_budget
+    params:
+      max_calls: 25
+    action: block
+    severity: medium
+    layer: budget
+    description: >
+      Runaway-loop cap for one turn. Generic — tune to your agent's normal
+      working range, and measure it against your benign corpus before you do.
+
+  - id: structuring
+    hook: before_tool
+    condition: repeated_call
+    params:
+      max_repeats: 3
+      match_args: false
+    action: block
+    severity: high
+    layer: budget
+    description: >
+      One action split into N sub-threshold actions to duck a review limit.
+      Fires at N+1: three calls are fine, the fourth is not.
+
+  - id: amount_bound
+    hook: before_tool
+    condition: numeric_bound
+    params:
+      tool: ''           # CLIENT: your move_value tool
+      arg: ''            # CLIENT: the amount argument
+      min: 0
+    action: require_hitl
+    severity: high
+    enabled: false
+    layer: bounds
+    description: >
+      CLIENT. Per-call value ceiling. Ships disabled because a ceiling that
+      does not match your business is worse than none — enable it once you
+      have a number you believe.
+
+  - id: llm_judge_intent
+    hook: before_tool
+    condition: llm_judge
+    params:
+      model: ''
+      temperature: 0
+      threshold: 0.8
+    action: require_hitl
+    severity: critical
+    enabled: false
+    layer: llm_judge
+    description: >
+      Ships DISABLED, and must stay disabled for any blocking gate. No LLM sits
+      in the enforcement path in v1. Enable it for non-blocking nightly runs
+      with `detguard run --enable-layer llm_judge`; with no backend configured
+      it fails OPEN and records why.
+
+  # -- after_tool -----------------------------------------------------------
+
+  - id: result_credential_leak
+    hook: after_tool
+    condition: pii_detect
+    params:
+      pattern_set: credential
+    action: block
+    severity: critical
+    layer: output_guard
+    description: >
+      Auth material in a tool's return value, on its way back into agent
+      context. No malicious call happened; the leak is in the data flow.
+
+  - id: result_pii_redact
+    hook: after_tool
+    condition: pii_redact
+    params:
+      pattern_set: pii
+      applies_to: retrieved
+    action: redact
+    severity: medium
+    layer: pii
+    description: >
+      Mask identifiers in tool results. A tool result is by definition content
+      the agent did not author, so applies_to: retrieved holds here.
+
+  # -- before_output --------------------------------------------------------
+
+  - id: output_credential_disclosure
+    hook: before_output
+    condition: pii_detect
+    params:
+      pattern_set: credential
+    action: block
+    severity: critical
+    layer: output_guard
+    description: >
+      The agent stating a secret in prose. No tool-call check anywhere in the
+      stack can see this, which is the entire reason before_output exists.
+
+  - id: output_pii_redact
+    hook: before_output
+    condition: pii_redact
+    params:
+      pattern_set: pii
+      applies_to: any
+    action: redact
+    severity: medium
+    layer: pii
+    description: >
+      Last-chance masking of identifiers in the final answer. Non-blocking:
+      the turn completes, the value does not.
+
+audit:
+  enabled: false
+  path: audit.jsonl

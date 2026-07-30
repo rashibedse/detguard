@@ -1,0 +1,130 @@
+# detguard's own CI.
+#
+# The client-facing gate is only trustworthy if the engine underneath is
+# correct. If `sensitive_tool_call` develops an off-by-one, every client's gate
+# goes green while they are wide open — a security tool that fails silently is
+# worse than no security tool. So this runs on every commit, against a
+# deterministic fixture agent, and needs no API key and no network.
+
+name: detguard CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Packaging smoke check
+        run: |
+          detguard --help
+          python -c "import detguard; print(detguard.__version__)"
+
+      - name: Unit tests
+        run: pytest -q
+
+  corpus:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # Determinism is a property we assert, not one we hope for: the corpus is
+      # built twice and the two builds must be byte-identical, or a diff in a
+      # client's repo stops meaning anything.
+      - name: Build corpus (twice, and diff)
+        run: |
+          detguard corpus build \
+            --manifest tests/fixture_manifest.yaml \
+            --roles tests/fixture_roles.yaml \
+            --out corpus/attacks
+          cp -r corpus/attacks /tmp/first
+          detguard corpus build \
+            --manifest tests/fixture_manifest.yaml \
+            --roles tests/fixture_roles.yaml \
+            --out corpus/attacks
+          diff -r /tmp/first corpus/attacks
+
+      - name: Run corpus — guardrail off
+        run: |
+          detguard run \
+            --corpus corpus/attacks \
+            --policy tests/fixture_policy.yaml \
+            --agent tests.fixture_agent:FixtureAgent \
+            --guardrail off \
+            --out results-off.json
+
+      - name: Run corpus — guardrail on
+        run: |
+          detguard run \
+            --corpus corpus/attacks \
+            --policy tests/fixture_policy.yaml \
+            --agent tests.fixture_agent:FixtureAgent \
+            --guardrail on \
+            --out results-on.json
+
+      - name: Report
+        run: |
+          detguard report \
+            --results results-on.json \
+            --unguarded results-off.json \
+            --out ci_report.json \
+            --markdown ci_report.md
+          cat ci_report.md >> "$GITHUB_STEP_SUMMARY"
+
+      # The corpus is worthless if the fixture agent is not actually vulnerable
+      # to it. An unguarded run that defends itself means the fixture drifted,
+      # and every defense number in the guarded run is then unearned.
+      - name: Assert the unguarded run is genuinely vulnerable
+        run: |
+          python - <<'PY'
+          import json, sys
+          off = json.load(open("results-off.json"))
+          on = json.load(open("results-on.json"))
+          off_breaches = off["summary"]["succeeded"]
+          on_breaches = on["summary"]["succeeded"]
+          print(f"unguarded {off_breaches} breach(es) → guarded {on_breaches}")
+          if off_breaches < 10:
+              sys.exit(f"fixture agent is not vulnerable enough ({off_breaches}); "
+                       "the guarded result proves nothing")
+          if on_breaches >= off_breaches:
+              sys.exit("enforcement prevented nothing")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: detguard-results
+          path: |
+            results-*.json
+            ci_report.json
+            ci_report.md
+            corpus/attacks/

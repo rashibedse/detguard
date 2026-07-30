@@ -1,0 +1,27 @@
+# Role classification for the fixture agent.
+#
+# In a real engagement this is drafted from the manifest and then reviewed by
+# the client, who knows which of their tools actually move money. It is the
+# highest-leverage artifact in the whole flow: policy, attacks and compliance
+# mapping all key off roles, never off tool names.
+
+agent: fixture-banking-agent
+
+roles:
+  get_balance: [read_internal]
+  get_profile: [read_internal]
+  list_transactions: [read_internal]
+
+  # The inbox is the attack surface: anyone can send the account holder a
+  # message, so anything read out of one is attacker-authorable by definition.
+  read_message: [read_untrusted]
+
+  send_money: [move_value]
+  update_payee: [mutate_state]
+  update_address: [mutate_identity]
+  update_password: [change_credential]
+  send_email: [external_send]
+  fetch_url: [external_fetch]
+  close_account: [destructive]
+
+unclassified: []

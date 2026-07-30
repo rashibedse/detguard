@@ -1,0 +1,177 @@
+# detguard client gate — copy this into your own repository.
+#
+# Two jobs, deliberately different in character:
+#
+#   pr       blocking. Deterministic layers only, PR subset, fails the build on
+#            a new breach. Fast enough that nobody resents it.
+#   nightly  non-blocking. Full corpus, llm_judge enabled, uploads artifacts.
+#            Slower and probabilistic, which is exactly why it must never gate
+#            a merge.
+#
+# That split is the answer to "regression-testing a nondeterministic system is
+# incoherent": the blocking gate runs against deterministic checks and, ideally,
+# a scripted agent; the real model runs nightly where a flaky result costs
+# somebody a look rather than a blocked release.
+#
+# Nothing here phones home. Your corpus, your baseline, your results, your repo.
+
+name: detguard
+
+on:
+  pull_request:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  DETGUARD_POLICY: guardrail/policy.yaml
+  DETGUARD_CORPUS: corpus/attacks
+  # module:factory returning your configured BaseAdapter
+  DETGUARD_AGENT: myapp.detguard_adapter:build_adapter
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Blocking gate on every pull request.
+  # -------------------------------------------------------------------------
+  pr:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install detguard
+          pip install -e .
+
+      # Rebuild from templates rather than trusting what is committed: a
+      # manifest change that nobody re-instantiated would otherwise leave you
+      # testing last month's tool surface.
+      - name: Rebuild corpus from the manifest
+        run: |
+          detguard corpus build \
+            --manifest guardrail/manifest.yaml \
+            --roles guardrail/roles.yaml \
+            --out "$DETGUARD_CORPUS"
+
+      - name: Run the PR subset
+        run: |
+          detguard run \
+            --corpus "$DETGUARD_CORPUS" \
+            --policy "$DETGUARD_POLICY" \
+            --agent "$DETGUARD_AGENT" \
+            --guardrail on \
+            --pr-subset \
+            --out results.json
+
+      - name: Compare against the baseline
+        run: |
+          detguard baseline compare \
+            --results results.json \
+            --baseline corpus/baseline.json
+
+      - name: Report
+        if: always()
+        run: |
+          detguard report \
+            --results results.json \
+            --baseline corpus/baseline.json \
+            --out ci_report.json \
+            --markdown ci_report.md
+          cat ci_report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: detguard-pr
+          path: |
+            results.json
+            ci_report.*
+
+  # -------------------------------------------------------------------------
+  # Nightly. Full corpus, model-based layer on, never blocking.
+  # -------------------------------------------------------------------------
+  nightly:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install detguard
+          pip install -e .
+
+      - name: Rebuild corpus
+        run: |
+          detguard corpus build \
+            --manifest guardrail/manifest.yaml \
+            --roles guardrail/roles.yaml \
+            --out "$DETGUARD_CORPUS"
+
+      # One policy file. The nightly run enables a layer inside it rather than
+      # loading a second file — two files drift, and then the gate is testing
+      # something you do not actually run.
+      - name: Full corpus, guardrail on, llm_judge enabled
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          detguard run \
+            --corpus "$DETGUARD_CORPUS" \
+            --policy "$DETGUARD_POLICY" \
+            --agent "$DETGUARD_AGENT" \
+            --guardrail on \
+            --enable-layer llm_judge \
+            --audit-log audit.jsonl \
+            --out results-nightly.json
+
+      - name: Same corpus, guardrail off
+        run: |
+          detguard run \
+            --corpus "$DETGUARD_CORPUS" \
+            --policy "$DETGUARD_POLICY" \
+            --agent "$DETGUARD_AGENT" \
+            --guardrail off \
+            --out results-nightly-off.json
+
+      - name: Report with the guarded/unguarded delta
+        run: |
+          detguard report \
+            --results results-nightly.json \
+            --unguarded results-nightly-off.json \
+            --baseline corpus/baseline.json \
+            --out ci_report-nightly.json \
+            --markdown ci_report-nightly.md
+          cat ci_report-nightly.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: detguard-nightly
+          path: |
+            results-nightly*.json
+            ci_report-nightly.*
+            audit.jsonl
+            corpus/attacks/
+
+# After a deliberate policy change, re-record the baseline and commit it:
+#
+#   detguard run --corpus corpus/attacks --policy guardrail/policy.yaml \
+#     --agent "$DETGUARD_AGENT" --guardrail on --out results.json
+#   detguard baseline snapshot --results results.json --out corpus/baseline.json
+#
+# Reviewing that diff is the point. It is the moment somebody has to look at a
+# gap and decide, in writing, that it is acceptable.

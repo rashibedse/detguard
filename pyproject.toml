@@ -1,0 +1,76 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "detguard"
+version = "0.1.0"
+description = "Policy-as-code enforcement for AI agent tool calls, plus an adversarial regression suite that proves the policy still works after every change."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = [
+    "ai-agents",
+    "guardrails",
+    "prompt-injection",
+    "security",
+    "policy-as-code",
+    "tool-calling",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+langgraph = [
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+]
+openai = [
+    "openai>=1.40",
+]
+dashboard = [
+    "streamlit>=1.36",
+    "pandas>=2.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+detguard = "detguard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["detguard"]
+# Templates and the default policy ship with the package. This matters:
+# the corpus IS the product, and it must be importable from an installed wheel.
+artifacts = [
+    "detguard/templates/*.yaml",
+    "detguard/policies/*.yaml",
+    "detguard/policies/*.md",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/detguard",
+    "/tests",
+    "/docs",
+    "/dashboard",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
