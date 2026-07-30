@@ -7,7 +7,7 @@ that ships with the repo — no API key, no network, no model.
 ## Install
 
 ```bash
-git clone https://github.com/yourorg/detguard && cd detguard
+git clone https://github.com/rashibedse/detguard && cd detguard
 pip install -e ".[dashboard,dev]"
 detguard --help
 ```

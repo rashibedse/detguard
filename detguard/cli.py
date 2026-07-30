@@ -135,6 +135,73 @@ def _cmd_report(args: argparse.Namespace) -> int:
     return report["exit_code"]
 
 
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Draft manifest.yaml by introspecting a live adapter — pure metadata,
+    no side effects.
+
+    ``introspect()`` never calls ``.invoke()`` and never touches
+    ``reset_hook``; it only reads tool names and argument schemas off
+    whatever the factory returns. If your factory needs a live DB
+    connection or API key just to construct the adapter, that is a design
+    issue in the factory/adapter, not something this command works around.
+    """
+    import importlib
+
+    import yaml
+
+    if not args.agent:
+        skeleton = {
+            "agent": "your-agent",
+            "framework": args.framework,
+            "principal": "the account holder",
+            "tools": [],
+            "untrusted_sources": [],
+            "state_paths": {},
+        }
+        with open(args.out, "w", encoding="utf-8") as handle:
+            handle.write(
+                "# detguard could not introspect your agent: no --agent "
+                "module:factory was given.\n"
+                "# Fill this skeleton in by hand, or rerun with "
+                "--agent module:factory_function.\n"
+            )
+            yaml.safe_dump(skeleton, handle, sort_keys=False)
+        print(f"detguard: no --agent given; wrote a commented skeleton to {args.out}")
+        return EXIT_OK
+
+    module_name, _, attr = args.agent.partition(":")
+    if not attr:
+        print(f"detguard: --agent must be 'module:factory', got {args.agent!r}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    try:
+        factory = getattr(importlib.import_module(module_name), attr)
+        adapter = factory()
+    except Exception as exc:  # noqa: BLE001 - surface whatever the factory raised
+        print(f"detguard: could not construct adapter from {args.agent!r}: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    if not hasattr(adapter, "introspect"):
+        print(f"detguard: adapter from {args.agent!r} has no introspect() method", file=sys.stderr)
+        return EXIT_CONFIG
+
+    manifest = adapter.introspect()
+    manifest.setdefault("framework", args.framework)
+
+    with open(args.out, "w", encoding="utf-8") as handle:
+        yaml.safe_dump(manifest, handle, sort_keys=False)
+
+    tool_count = len(manifest.get("tools", []))
+    print(f"wrote {tool_count} tool(s) to {args.out}")
+    if not tool_count:
+        print(
+            "warning: no tools discovered — check that --agent's factory returns "
+            "a fully constructed adapter wrapping a real tool registry",
+            file=sys.stderr,
+        )
+    return EXIT_OK
+
+
 def _load_adapter(args: argparse.Namespace):
     """Resolve --adapter / --agent into a live BaseAdapter."""
     import importlib
@@ -264,7 +331,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="which adapter performs the introspection",
     )
     p_init.add_argument("--out", default="manifest.yaml", help="output path")
-    p_init.set_defaults(_handler=lambda args: _pending("init", 6))
+    p_init.add_argument(
+        "--agent",
+        default=None,
+        metavar="module:factory",
+        help="import path to a zero-arg callable returning a BaseAdapter; "
+        "omit to emit a hand-fillable skeleton instead",
+    )
+    p_init.set_defaults(_handler=_cmd_init)
 
     # detguard corpus ------------------------------------------------------
     p_corpus = sub.add_parser(
