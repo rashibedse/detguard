@@ -180,12 +180,13 @@ def test_init_rejects_incoherent_flag_combinations(project, overrides, expected,
     assert expected in capsys.readouterr().err
 
 
-def test_init_agent_factory_remains_the_fallback(project, capsys):
+def test_init_agent_factory_remains_the_fallback(project):
     """--agent must keep working, for custom input_key / inject / tools."""
     (project / "custom.py").write_text(
         "class A:\n"
         "    def introspect(self):\n"
-        "        return {'agent': 'hand-built', 'tools': []}\n"
+        "        return {'agent': 'hand-built',\n"
+        "                'tools': [{'name': 'send_money', 'params': {}}]}\n"
         "def make():\n"
         "    return A()\n"
     )
@@ -198,8 +199,31 @@ def test_init_agent_factory_remains_the_fallback(project, capsys):
     assert manifest["agent"] == "hand-built"
     # framework is filled in from the flag, not guessed
     assert manifest["framework"] == "langgraph"
-    assert "no tools discovered" in capsys.readouterr().err
     sys.modules.pop("custom", None)
+
+
+def test_init_refuses_to_write_a_manifest_with_no_tools(project, capsys):
+    """Discovering nothing is a config error, not a draft.
+
+    ``parse_manifest`` rejects an empty tool list outright, so exiting 0 here
+    used to hand the user a file that every later command refused — and made it
+    read like their mistake rather than a failed discovery.
+    """
+    (project / "empty.py").write_text(
+        "class A:\n"
+        "    def introspect(self):\n"
+        "        return {'agent': 'x', 'tools': []}\n"
+        "def make():\n"
+        "    return A()\n"
+    )
+    sys.modules.pop("empty", None)
+
+    rc = cli._cmd_init(_init_args(agent="empty:make"))
+
+    assert rc == cli.EXIT_CONFIG
+    assert not (project / "manifest.yaml").exists(), "must not leave a broken file"
+    assert "no tools discovered" in capsys.readouterr().err
+    sys.modules.pop("empty", None)
 
 
 def test_init_without_agent_or_graph_still_writes_a_skeleton(project, capsys):
@@ -302,6 +326,41 @@ def test_package_is_runnable_as_python_dash_m_detguard():
     import detguard.__main__ as entry
 
     assert entry.main is cli.main
+
+
+def test_output_streams_can_carry_non_ascii(capsysbinary, monkeypatch):
+    """A report must not die on the operator's codepage.
+
+    Windows consoles default to cp1252, where printing an em-dash or a warning
+    glyph raises UnicodeEncodeError partway through — turning a client-facing
+    report into a traceback.
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, "-c", "from detguard.cli import main; main(['--version'])"],
+        capture_output=True,
+    )
+    assert result.returncode == 0
+
+    # The real assertion: rendering a report containing non-ASCII does not raise.
+    from detguard.report import to_markdown
+
+    markdown = to_markdown(
+        {
+            "summary": {"succeeded": 0, "blocked": 1, "defense_rate": 1.0},
+            "measurement": {
+                "coverage": 0.5,
+                "evaluated": 1,
+                "total": 2,
+                "inconclusive": 1,
+                "warnings": [
+                    {"kind": "INCOMPLETE_MEASUREMENT", "detail": "x", "causes": []}
+                ],
+            },
+        }
+    )
+    assert markdown.encode("utf-8").decode("utf-8") == markdown
 
 
 def test_dash_m_invocation_reports_the_right_program_name():

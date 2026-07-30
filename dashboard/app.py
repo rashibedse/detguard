@@ -29,12 +29,16 @@ OUTCOME_COLOURS = {
     "approval_required": "#e08e0b",
     "blocked": "#1f7a4d",
     "not_complied": "#7f8c8d",
+    # Deliberately not green and not grey. An attack nobody could evaluate is a
+    # hole in the evidence, and it should not read as a quiet pass.
+    "inconclusive": "#8e44ad",
 }
 OUTCOME_LABELS = {
     "breach": "Breach",
     "approval_required": "Held for approval",
     "blocked": "Blocked",
     "not_complied": "Agent did not comply",
+    "inconclusive": "Could not be evaluated",
 }
 
 
@@ -76,6 +80,7 @@ def to_frame(run: dict) -> pd.DataFrame:
                 "roles_used": ", ".join(r.get("roles_used") or []),
                 "check_type": (r.get("success_check") or {}).get("type", ""),
                 "check_reason": (r.get("success_check") or {}).get("reason", ""),
+                "reason_code": r.get("reason_code") or "",
                 "guardrail": run.get("guardrail", ""),
                 "run": os.path.basename(run.get("_path", "")),
                 "generated_at": run.get("generated_at", ""),
@@ -173,18 +178,38 @@ false_positives = int((benign["outcome"] != "not_complied").sum()) if len(benign
 fp_rate = (false_positives / len(benign)) if len(benign) else None
 critical_gaps = int(((attacks_only["severity"] == "critical") & attacks_only["succeeded"]).sum())
 
-k1, k2, k3, k4, k5 = st.columns(5)
+coverage = summary.get("coverage")
+inconclusive = int(summary.get("inconclusive") or 0)
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
 k1.metric("Defense rate", f"{summary.get('defense_rate', 0):.1%}")
 k2.metric(
+    "Coverage",
+    f"{coverage:.1%}" if coverage is not None else "—",
+    help="The share of attacks detguard could actually evaluate. A high defense "
+    "rate over low coverage is not a result — the rest were neither defended "
+    "nor breached, they were simply unobserved.",
+)
+k3.metric(
     "False-positive rate",
     f"{fp_rate:.1%}" if fp_rate is not None else "—",
     help="Measured against the benign suite. No benign corpus loaded means no "
     "number — and a guardrail with an unmeasured FP rate eventually gets "
     "switched off.",
 )
-k3.metric("Attacks run", int(len(attacks_only)))
-k4.metric("Critical gaps open", critical_gaps, delta_color="inverse")
-k5.metric("Policy", (guarded.get("policy_hash") or "—")[:12])
+k4.metric("Attacks run", int(len(attacks_only)))
+k5.metric("Critical gaps open", critical_gaps, delta_color="inverse")
+k6.metric("Policy", (guarded.get("policy_hash") or "—")[:12])
+
+if inconclusive:
+    causes = summary.get("inconclusive_by_cause") or {}
+    detail = ", ".join(f"`{code}` ×{count}" for code, count in sorted(causes.items()))
+    st.warning(
+        f"**{inconclusive} attack(s) could not be evaluated** — {detail}. These are "
+        "counted as neither defended nor breached. Until coverage reaches 100%, "
+        "the defense rate describes only the attacks above it.",
+        icon="⚠️",
+    )
 
 if fp_rate is None:
     st.info(
@@ -463,7 +488,9 @@ st.markdown("---")
 st.subheader("Per-attack detail")
 
 by_id = {r.get("id"): r for r in guarded.get("results", [])}
-order = {"breach": 0, "approval_required": 1, "not_complied": 2, "blocked": 3}
+# Inconclusive sorts second: after real breaches, ahead of everything that was
+# actually observed, because it is the category that needs a decision from a human.
+order = {"breach": 0, "inconclusive": 1, "approval_required": 2, "not_complied": 3, "blocked": 4}
 visible = sorted(view["id"], key=lambda i: (order.get(by_id.get(i, {}).get("outcome", ""), 9), i))
 
 for attack_id in visible:
@@ -471,9 +498,13 @@ for attack_id in visible:
     if not record:
         continue
     outcome = record.get("outcome", "")
-    badge = {"breach": "🔴", "approval_required": "🟠", "blocked": "🟢", "not_complied": "⚪"}.get(
-        outcome, "•"
-    )
+    badge = {
+        "breach": "🔴",
+        "approval_required": "🟠",
+        "blocked": "🟢",
+        "not_complied": "⚪",
+        "inconclusive": "🟣",
+    }.get(outcome, "•")
     label = OUTCOME_LABELS.get(outcome, outcome)
     with st.expander(
         f"{badge}  {attack_id} — {record.get('family', '')} / {record.get('severity', '')} — {label}"

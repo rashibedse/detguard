@@ -151,9 +151,9 @@ detguard init --framework langgraph \
   --graph agent.graph:graph \
   --reset db.seed:seed \
   --agent-name email-assistant \
-  --out manifest.yaml
+  --out config/manifest.yaml
 
-detguard run --corpus corpus/attacks --policy guardrail/policy.yaml \
+detguard run --corpus corpus/attacks --policy config/policy.yaml \
   --adapter langgraph --graph agent.graph:graph --reset db.seed:seed \
   --guardrail on --out results.json
 ```
@@ -163,9 +163,84 @@ the directory you run from; detguard constructs the `LangGraphAdapter` itself.
 `--reset` is optional for `init`, which only reads metadata, and required for
 `run`, which needs fresh state per attack.
 
+#### How tools are found
+
+You do not have to tell detguard what your tools are. It tries four sources, in
+order, and stops at the first that yields any:
+
+| Order | Source | Reported as |
+|---|---|---|
+| 1 | `--tools` / `tools=[...]` | `explicit` |
+| 2 | a prebuilt `ToolNode`'s registry | `tool_node` |
+| 3 | a model built with `llm.bind_tools([...])` | `bound_model:NAME` |
+| 4 | a module-level tool list or dict used by a graph node | `module_global:NAME` |
+
+Strategy 3 comes before 4 because it is authoritative — those are definitionally
+the tools the model can emit a call for, and they carry argument schemas.
+Strategy 4 is what finds `ALL_TOOLS` in a graph whose tool node is hand-written,
+which is the common case that used to require an adapter file.
+
+Every tool records its source in the manifest as `discovered_from`, so a wrong
+guess is visible in review and in the diff rather than silently shaping a corpus.
+When strategy 4 is used at all, `init` says so on stderr. If it guesses wrong,
+override it:
+
+```bash
+detguard init --framework langgraph --graph agent.graph:graph \
+  --tools mypackage.tools:ALL_TOOLS
+```
+
+`--tools` accepts a list of tools or a dict of `name -> tool`.
+
+Discovering nothing is a **config error**, not a draft: `init` exits 2 and names
+what it tried. An empty `tools:` list would be rejected by every later command
+anyway, so writing one out only moves the failure somewhere less informative.
+
+#### Reading post-attack state
+
+Success checks for several templates ask what changed in your system — did the
+payee move, did the credential change. Only your code can answer, so pass a
+reader:
+
+```bash
+detguard run ... --state-reader myapp.detguard_state:read
+```
+
+Build one from data rather than writing path dispatch by hand:
+
+```python
+from detguard.adapters.state import sql_reader
+import sqlite3
+
+read = sql_reader(
+    lambda: sqlite3.connect("app.db"),
+    {
+        "emails.last_recipient":
+            "SELECT to_emails FROM emails ORDER BY id DESC LIMIT 1",
+        "account.credential": "SELECT credential FROM account",
+    },
+)
+```
+
+`mapping_reader({path: callable})` is the same idea for non-SQL state.
+
+**Both return `UNREADABLE` for a path they were not given, and this matters more
+than it looks.** A reader that returns `None` for an unmapped path is
+indistinguishable from a path whose value genuinely is `None`, and a
+`field_changed` check comparing `None != None` concludes the state did not change
+— which the report presents as a successful defence. A hand-rolled reader that
+falls through to `return None` will therefore hide real breaches as green rows.
+Use these helpers, or return `UNREADABLE` yourself:
+
+```python
+from detguard.adapters.state import UNREADABLE
+```
+
+Without any reader, state-based checks are reported as `inconclusive` and
+coverage drops below 100% — never as defended.
+
 Write a factory and pass `--agent` instead when you need something the flags do
-not cover — a non-default `input_key`, a custom `inject`, an explicit `tools`
-list, or a `state_reader`:
+not cover — a non-default `input_key` or a custom `inject`:
 
 ```python
 from detguard.adapters.langgraph import LangGraphAdapter
@@ -179,10 +254,9 @@ def build_adapter():
     )
 ```
 
-Requires `pip install "detguard[langgraph]"`. Tools are discovered from the
-graph's `ToolNode`; pass `tools=[...]` if yours live somewhere unusual. The
-`reset_hook` is required, not optional — without fresh state per attack,
-results leak between cases and every number in the report is meaningless.
+Requires `pip install "detguard[langgraph]"`. The `reset_hook` is required, not
+optional — without fresh state per attack, results leak between cases and every
+number in the report is meaningless.
 
 LangGraph already ships `interrupt()`, which is a perfectly good HITL
 mechanism. detguard is not replacing it. The difference is that a

@@ -29,6 +29,7 @@ GAP_CLOSED = "GAP_CLOSED"        # a known gap closed — fail, update the basel
 NEW_CASE = "NEW_CASE"            # in the run, not in the baseline — warn
 MISSING_CASE = "MISSING_CASE"    # in the baseline, not in the run — warn
 POLICY_DRIFT = "POLICY_DRIFT"    # the policy file changed — info
+MEASUREMENT_LOST = "MEASUREMENT_LOST"  # was measurable, now is not — fail, never a fix
 
 FAILING_CLASSES = (NEW_BREACH, GAP_CLOSED)
 WARNING_CLASSES = (LAYER_DRIFT, NEW_CASE, MISSING_CASE)
@@ -75,6 +76,10 @@ def snapshot(results: dict) -> dict:
             "blocked_at_hook": r.get("blocked_at_hook") or "",
             "severity": r.get("severity", ""),
             "outcome": r.get("outcome", ""),
+            # Recorded so a case that stops being measurable can say why, and so
+            # a baseline taken from a partly-blind run is self-describing rather
+            # than silently authoritative.
+            "reason_code": r.get("reason_code", ""),
         }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -178,6 +183,25 @@ def compare(results: dict, baseline: dict) -> dict:
             continue
 
         if not now["succeeded"] and before["succeeded"]:
+            # A breach that became unmeasurable has not been fixed. Reporting it
+            # as FIXED or GAP_CLOSED would turn a broken harness into apparent
+            # security progress — the single most dangerous thing this file could
+            # get wrong, because it is the one finding nobody re-checks.
+            if now.get("outcome") == "inconclusive":
+                findings.append(
+                    Finding(
+                        kind=MEASUREMENT_LOST,
+                        id=case_id,
+                        severity=now["severity"],
+                        detail=(
+                            "previously succeeded; now cannot be evaluated "
+                            f"({now.get('reason_code') or 'unknown cause'}). This is "
+                            "not a fix — the check stopped working, not the attack"
+                        ),
+                        fails=True,
+                    )
+                )
+                continue
             if was_gap:
                 findings.append(
                     Finding(

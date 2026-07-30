@@ -25,6 +25,28 @@ EXIT_REGRESSION = 1
 EXIT_CONFIG = 2
 
 
+def _ensure_utf8_output() -> None:
+    """Make stdout/stderr able to carry non-ASCII.
+
+    Windows consoles default to a legacy codepage (cp1252 here), and writing a
+    character outside it raises ``UnicodeEncodeError`` mid-print — so a report
+    containing an em-dash, a warning glyph, or simply a tool description in a
+    non-Latin script would crash the command rather than print. Reports are
+    client-facing artifacts; they cannot depend on the operator's codepage.
+
+    ``errors="replace"`` is the backstop: if the stream cannot be reconfigured,
+    losing a glyph is acceptable, but losing the report is not.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):  # pragma: no cover - stream already detached
+            pass
+
+
 def _ensure_cwd_importable() -> None:
     """Put the invocation directory on ``sys.path``.
 
@@ -178,7 +200,29 @@ def _build_langgraph_adapter(args: argparse.Namespace):
     kwargs: dict = {"graph": graph, "reset_hook": reset_hook}
     if getattr(args, "agent_name", None):
         kwargs["agent_name"] = args.agent_name
+    if getattr(args, "tools", None):
+        kwargs["tools"] = _resolve_tools(args.tools)
+    if getattr(args, "state_reader", None):
+        kwargs["state_reader"] = _resolve_import(args.state_reader, "--state-reader")
     return LangGraphAdapter(**kwargs)
+
+
+def _resolve_tools(spec: str) -> list:
+    """Resolve ``--tools`` to a list, accepting a list/tuple or a name->tool dict.
+
+    Both shapes are common in real projects (``ALL_TOOLS`` and ``TOOLS_BY_NAME``),
+    and making the user care which one they happened to write is exactly the kind
+    of friction this flag exists to remove.
+    """
+    resolved = _resolve_import(spec, "--tools")
+    if isinstance(resolved, dict):
+        return list(resolved.values())
+    if isinstance(resolved, (list, tuple)):
+        return list(resolved)
+    raise ValueError(
+        f"--tools must name a list or a dict of tools, got {type(resolved).__name__} "
+        f"from {spec!r}"
+    )
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -206,9 +250,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_CONFIG
-    if args.reset and not args.graph:
-        print("detguard: --reset only applies alongside --graph", file=sys.stderr)
-        return EXIT_CONFIG
+    for flag in ("reset", "tools", "state_reader"):
+        if getattr(args, flag, None) and not args.graph:
+            name = "--" + flag.replace("_", "-")
+            print(f"detguard: {name} only applies alongside --graph", file=sys.stderr)
+            return EXIT_CONFIG
 
     if args.graph:
         try:
@@ -256,26 +302,70 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _write_manifest(adapter, args: argparse.Namespace) -> int:
-    """Introspect an adapter and write the drafted manifest to ``--out``."""
+    """Introspect an adapter and write the drafted manifest to ``--out``.
+
+    A manifest with no tools is not a draft — ``parse_manifest`` rejects it
+    ("'tools' must be a non-empty list"), so every downstream command fails or
+    skips everything. Discovering nothing is therefore a config error and exits
+    2; it used to warn and exit 0, which left the user holding a broken file and
+    reading it as their own fault.
+    """
     import yaml
 
     manifest = adapter.introspect()
     manifest.setdefault("framework", args.framework)
 
+    if not manifest.get("tools"):
+        _report_no_tools(args)
+        return EXIT_CONFIG
+
     with open(args.out, "w", encoding="utf-8") as handle:
         yaml.safe_dump(manifest, handle, sort_keys=False)
 
-    tool_count = len(manifest.get("tools", []))
-    print(f"wrote {tool_count} tool(s) to {args.out}")
-    if not tool_count:
-        source = "--graph's compiled graph" if args.graph else "--agent's factory"
+    tools = manifest["tools"]
+    print(f"wrote {len(tools)} tool(s) to {args.out}")
+    for tool in tools:
+        origin = tool.get("discovered_from")
+        print(f"  {tool['name']:24} {'from ' + origin if origin else ''}")
+
+    # Where a tool came from is part of the claim this manifest makes. A guess
+    # that nobody can see is a guess nobody can correct.
+    if any(str(t.get("discovered_from", "")).startswith("module_global") for t in tools):
+        # stdout is block-buffered when piped while stderr is not, so without
+        # this the caveat appears above the list it refers to.
+        sys.stdout.flush()
         print(
-            f"warning: no tools discovered — check that {source} exposes a real "
-            "tool registry (for langgraph, a ToolNode; otherwise pass tools=[...] "
-            "from your own factory via --agent)",
+            "\nnote: some tools were found by scanning a graph node's module for a "
+            "tool list. That is a heuristic — check the names above, and pass "
+            "--tools module:LIST to state them explicitly if it guessed wrong.",
             file=sys.stderr,
         )
     return EXIT_OK
+
+
+def _report_no_tools(args: argparse.Namespace) -> None:
+    """Say what was tried, and the exact flag that fixes it."""
+    print("detguard: no tools discovered — cannot draft a manifest.", file=sys.stderr)
+
+    if args.graph:
+        from .adapters.langgraph import DISCOVERY_STRATEGIES
+
+        print("\nTried, in order:", file=sys.stderr)
+        for strategy in DISCOVERY_STRATEGIES:
+            print(f"  - {strategy}", file=sys.stderr)
+        print(
+            "\nIf your tools live somewhere else, name them directly:\n"
+            "  --tools mypackage.tools:ALL_TOOLS\n"
+            "It accepts a list of tools or a dict of name -> tool.",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"\nThe adapter from {args.agent!r} returned no tools. Check that its "
+            "factory wraps a real tool registry — for LangGraph you can skip the "
+            "factory entirely with --graph module:graph.",
+            file=sys.stderr,
+        )
 
 
 def _load_adapter(args: argparse.Namespace):
@@ -443,6 +533,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="langgraph only: import path to the per-attack state reset hook",
     )
     p_init.add_argument(
+        "--tools",
+        default=None,
+        metavar="module:LIST",
+        help="langgraph only: import path to a list or name->tool dict. Only "
+        "needed when automatic discovery guesses wrong or finds nothing",
+    )
+    p_init.add_argument(
+        "--state-reader",
+        default=None,
+        metavar="module:function",
+        help="langgraph only: fn(path) -> value, for success checks that read "
+        "post-attack state",
+    )
+    p_init.add_argument(
         "--agent-name",
         default=None,
         metavar="NAME",
@@ -536,6 +640,20 @@ def build_parser() -> argparse.ArgumentParser:
         "with --graph",
     )
     p_run.add_argument(
+        "--tools",
+        default=None,
+        metavar="module:LIST",
+        help="--adapter langgraph only: import path to a list or name->tool dict, "
+        "when automatic discovery needs overriding",
+    )
+    p_run.add_argument(
+        "--state-reader",
+        default=None,
+        metavar="module:function",
+        help="--adapter langgraph only: fn(path) -> value. Without it, state-based "
+        "success checks cannot be evaluated and are reported as such",
+    )
+    p_run.add_argument(
         "--agent-name",
         default=None,
         metavar="NAME",
@@ -589,6 +707,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    _ensure_utf8_output()
 
     # Before any `module:attribute` string is resolved: the installed console
     # script and `python -m detguard.cli` must import the user's project the

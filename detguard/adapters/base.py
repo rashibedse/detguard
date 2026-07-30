@@ -41,9 +41,9 @@ from typing import Any
 # AgentRun is part of the canonical event model, not of the adapter layer —
 # core has to be able to reason about a turn without importing anything from
 # here. Re-exported so adapters can keep importing it from their own package.
-from ..events import AgentRun, ToolCall
+from ..events import UNREADABLE, AgentRun, ToolCall, Unreadable
 
-__all__ = ["AgentRun", "BaseAdapter"]
+__all__ = ["AgentRun", "BaseAdapter", "UNREADABLE", "Unreadable"]
 
 
 class BaseAdapter(ABC):
@@ -65,28 +65,36 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     def get_state(self, path: str) -> Any:
-        """Read the value at a dotted path, or None when it does not exist."""
+        """Read the value at a dotted path.
+
+        Return :data:`UNREADABLE` when the path cannot be read at all — never
+        ``None`` as a stand-in for "don't know", because the runner cannot tell
+        that apart from a genuine empty value and would score it as a defence.
+        """
 
     # -- shared helpers ----------------------------------------------------
 
     @staticmethod
     def read_path(state: Any, path: str) -> Any:
-        """Walk a dotted path through nested mappings. Missing → None.
+        """Walk a dotted path through nested mappings.
+
+        Missing → :data:`UNREADABLE`, so that "this state has no such path" is
+        reported rather than silently answering the success check with ``None``.
 
         Provided here so that every adapter resolves ``customer.address`` the
         same way; a success check that means different things to different
         adapters is not a check.
         """
         if not path:
-            return None
+            return UNREADABLE
         current = state
         for part in str(path).split("."):
             if isinstance(current, dict) and part in current:
                 current = current[part]
-            elif hasattr(current, part):
+            elif not isinstance(current, dict) and hasattr(current, part):
                 current = getattr(current, part)
             else:
-                return None
+                return UNREADABLE
         return current
 
     @staticmethod

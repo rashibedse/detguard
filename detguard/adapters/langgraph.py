@@ -20,12 +20,22 @@ with a measured false-positive rate. "We have HITL" is not differentiating;
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from dataclasses import dataclass
+from typing import Any, Callable, Iterator
 
-from .base import AgentRun, BaseAdapter
+from .base import UNREADABLE, AgentRun, BaseAdapter
 
 _IMPORT_HINT = (
     "LangGraph support needs the optional extra: pip install \"detguard[langgraph]\""
+)
+
+#: Strategies ``_discover_tools`` will try, in order, for the error message that
+#: names them when every one comes back empty.
+DISCOVERY_STRATEGIES = (
+    "explicit tools= / --tools",
+    "a prebuilt ToolNode's registry",
+    "a model built with llm.bind_tools([...])",
+    "a module-level tool list or dict used by a graph node",
 )
 
 
@@ -34,6 +44,122 @@ def _require_langgraph():
         import langgraph  # noqa: F401
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise ImportError(_IMPORT_HINT) from exc
+
+
+@dataclass(frozen=True)
+class Discovered:
+    """A tool plus the strategy that found it."""
+
+    tool: Any
+    source: str
+
+
+def _is_tool(obj: Any) -> bool:
+    """Does this look like a LangChain tool?
+
+    ``isinstance(obj, BaseTool)`` first, because it is exact. The structural
+    fallback exists for tools that are not ``BaseTool`` subclasses at all.
+
+    Note what is *not* tested: callability. A ``@tool``-decorated function
+    becomes a ``StructuredTool``, and in current langchain-core those are
+    ``Runnable``s with no ``__call__`` — so ``callable()`` is False for every
+    real tool, and screening on it rejects the entire tool surface.
+    """
+    try:
+        from langchain_core.tools import BaseTool
+
+        if isinstance(obj, BaseTool):
+            return True
+    except ImportError:  # pragma: no cover - langchain-core is a langgraph dep
+        pass
+
+    name = getattr(obj, "name", None)
+    if not isinstance(name, str) or not name:
+        return False
+    if not hasattr(obj, "description"):
+        return False
+    # A name and a description alone would match plenty of ordinary config
+    # objects, so require some evidence of an invocable tool as well.
+    return any(hasattr(obj, attr) for attr in ("args_schema", "args", "invoke", "run"))
+
+
+def _module_globals(func: Any) -> Iterator[tuple[str, Any]]:
+    """Yield ``(name, value)`` from the module a node function was defined in.
+
+    Snapshotted with ``list()``: a live ``__globals__`` can be mutated by an
+    import happening on another thread, and iterating it directly raises
+    ``RuntimeError: dictionary changed size during iteration``.
+    """
+    namespace = getattr(func, "__globals__", None)
+    if not isinstance(namespace, dict):
+        return
+    for name, value in list(namespace.items()):
+        if not name.startswith("__"):
+            yield name, value
+
+
+def _bound_tools(holder: Any, source: str) -> list[Discovered]:
+    """Read tool schemas off a ``RunnableBinding`` produced by ``bind_tools``.
+
+    These arrive as OpenAI-format dicts rather than tool objects, so they are
+    wrapped in a shim exposing the ``name``/``description``/``args_schema``
+    surface the rest of this module reads.
+    """
+    kwargs = getattr(holder, "kwargs", None)
+    if not isinstance(kwargs, dict):
+        return []
+    entries = kwargs.get("tools")
+    if not isinstance(entries, (list, tuple)):
+        return []
+
+    found: list[Discovered] = []
+    for entry in entries:
+        spec = entry.get("function", entry) if isinstance(entry, dict) else entry
+        if not isinstance(spec, dict) or not spec.get("name"):
+            continue
+        found.append(Discovered(_SchemaTool(spec), source))
+    return found
+
+
+class _SchemaTool:
+    """A tool known only by its JSON Schema, not as a live object.
+
+    Introspection needs a name, a description and an argument shape; a bound
+    model carries exactly those. This deliberately has no ``__call__`` — nothing
+    in detguard ever executes a tool, and a shim that looked callable would
+    invite something to try.
+    """
+
+    def __init__(self, spec: dict):
+        self.name = str(spec.get("name", ""))
+        self.description = str(spec.get("description", "") or "")
+        self._schema = spec.get("parameters") or {}
+
+    @property
+    def params(self) -> dict:
+        properties = self._schema.get("properties") or {}
+        required = set(self._schema.get("required") or [])
+        return {
+            key: {
+                "type": str((value or {}).get("type", "any")),
+                "required": key in required,
+            }
+            for key, value in properties.items()
+        }
+
+
+def _dedupe(found: list[Discovered]) -> list[Discovered]:
+    """One entry per tool name; first strategy to name a tool wins.
+
+    Sibling node functions share a single ``__globals__`` dict, so a graph with
+    two nodes defined in one module yields every tool twice without this.
+    """
+    seen: dict[str, Discovered] = {}
+    for entry in found:
+        name = getattr(entry.tool, "name", None) or getattr(entry.tool, "__name__", "")
+        if name and name not in seen:
+            seen[name] = entry
+    return list(seen.values())
 
 
 class LangGraphAdapter(BaseAdapter):
@@ -86,34 +212,98 @@ class LangGraphAdapter(BaseAdapter):
 
     # -- discovery ---------------------------------------------------------
 
-    def _discover_tools(self) -> list:
-        """Find the tools, from the constructor or by walking the graph's nodes.
+    def _discover_tools(self) -> list[Discovered]:
+        """Find this graph's tools, and record where each one came from.
 
-        LangGraph does not expose a single canonical registry, so this looks in
-        the places a ToolNode actually keeps them and gives up honestly rather
-        than guessing.
+        LangGraph has no canonical tool registry, so there is no single place to
+        look. The previous version looked in exactly one — a ``ToolNode``'s
+        ``tools_by_name`` — and returned nothing for any graph that runs its
+        tools from a node of its own. "Nothing" then reached the user as an empty
+        manifest and an implicit instruction to go write an adapter by hand,
+        which is not a thing an adapter should ask for.
+
+        So: four strategies, most authoritative first, stopping at the first that
+        yields anything. Every tool carries the strategy that found it, because a
+        discovered tool list is a claim about the agent's attack surface and a
+        claim whose origin cannot be stated is not reviewable.
         """
         if self._tools:
-            return self._tools
+            return [Discovered(tool, "explicit") for tool in self._tools]
 
-        found: list = []
+        for strategy in (
+            self._from_tool_nodes,
+            self._from_bound_models,
+            self._from_node_globals,
+        ):
+            found = _dedupe(strategy())
+            if found:
+                self._tools = [d.tool for d in found]
+                return found
+
+        return []
+
+    def _iter_nodes(self):
+        """Yield ``(runnable, underlying_function_or_runnable)`` per graph node."""
         nodes = getattr(getattr(self.graph, "builder", None), "nodes", None) or {}
         for node in nodes.values():
             runnable = getattr(node, "runnable", node)
+            func = getattr(runnable, "func", None) or getattr(runnable, "afunc", None)
+            yield runnable, (func or runnable)
+
+    def _from_tool_nodes(self) -> list[Discovered]:
+        """A prebuilt ``ToolNode``, which keeps its tools in a known place."""
+        found: list[Discovered] = []
+        for runnable, _ in self._iter_nodes():
             registry = getattr(runnable, "tools_by_name", None)
             if isinstance(registry, dict):
-                found.extend(registry.values())
+                found.extend(Discovered(t, "tool_node") for t in registry.values())
                 continue
             tools = getattr(runnable, "tools", None)
             if isinstance(tools, (list, tuple)):
-                found.extend(tools)
+                found.extend(Discovered(t, "tool_node") for t in tools)
+        return found
 
-        self._tools = found
+    def _from_bound_models(self) -> list[Discovered]:
+        """Schemas off a model built with ``llm.bind_tools([...])``.
+
+        The most authoritative source available: it is definitionally the set the
+        model can emit a call for, and it carries argument schemas. Checked ahead
+        of the globals scan for exactly that reason.
+        """
+        found: list[Discovered] = []
+        for runnable, func in self._iter_nodes():
+            for holder in (runnable, func):
+                found.extend(_bound_tools(holder, "bound_model"))
+            for name, value in _module_globals(func):
+                found.extend(_bound_tools(value, f"bound_model:{name}"))
+        return found
+
+    def _from_node_globals(self) -> list[Discovered]:
+        """A module-level tool list or dict referenced by a node function.
+
+        This is what recovers ``ALL_TOOLS`` from a graph whose tool node is
+        hand-written. It is a heuristic and labelled as one: the source records
+        the variable it came from, so a wrong guess shows up in the manifest and
+        in review rather than silently shaping a corpus.
+        """
+        found: list[Discovered] = []
+        for _, func in self._iter_nodes():
+            for name, value in _module_globals(func):
+                source = f"module_global:{name}"
+                if isinstance(value, (list, tuple)) and value and all(map(_is_tool, value)):
+                    found.extend(Discovered(t, source) for t in value)
+                elif (
+                    isinstance(value, dict)
+                    and value
+                    and all(map(_is_tool, value.values()))
+                ):
+                    found.extend(Discovered(t, source) for t in value.values())
         return found
 
     def introspect(self) -> dict:
         tools = []
-        for tool in self._discover_tools():
+        for entry in self._discover_tools():
+            tool = entry.tool
             tool_name = getattr(tool, "name", None) or getattr(tool, "__name__", "")
             if not tool_name:
                 continue
@@ -122,6 +312,7 @@ class LangGraphAdapter(BaseAdapter):
                     "name": tool_name,
                     "description": (getattr(tool, "description", "") or "").strip(),
                     "params": _schema_params(tool),
+                    "discovered_from": entry.source,
                 }
             )
         tools.sort(key=lambda t: t["name"])
@@ -155,7 +346,10 @@ class LangGraphAdapter(BaseAdapter):
         if self.config:
             snapshot = self.graph.get_state(self.config)
             return self.read_path(getattr(snapshot, "values", {}) or {}, path)
-        return None
+        # No reader and no thread config: this adapter has no way to observe the
+        # world. Saying UNREADABLE rather than None is what stops every
+        # state-based check in the corpus from quietly scoring as a defence.
+        return UNREADABLE
 
     def invoke(self, user_prompt: str, injected_context: dict | None = None) -> AgentRun:
         inputs: dict = {self.input_key: [{"role": "user", "content": user_prompt}]}
@@ -192,8 +386,18 @@ class LangGraphAdapter(BaseAdapter):
 
 def _schema_params(tool: Any) -> dict:
     """Read an argument schema off a LangChain tool, pydantic v1 or v2."""
+    if isinstance(tool, _SchemaTool):  # already JSON Schema, from a bound model
+        return tool.params
+
     schema = getattr(tool, "args_schema", None)
     if schema is None:
+        # A plain ``@tool``-decorated function keeps its shape in ``args``.
+        args = getattr(tool, "args", None)
+        if isinstance(args, dict):
+            return {
+                key: {"type": str((value or {}).get("type", "any")), "required": True}
+                for key, value in args.items()
+            }
         return {}
     try:
         fields = getattr(schema, "model_fields", None)

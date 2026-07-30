@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .base import AgentRun, BaseAdapter
+from .base import UNREADABLE, AgentRun, BaseAdapter
 
 _IMPORT_HINT = (
     "OpenAI Agents SDK support needs the optional extra: "
@@ -128,7 +128,10 @@ class OpenAIAgentsAdapter(BaseAdapter):
         self.reset_hook()
 
     def get_state(self, path: str) -> Any:
-        return self.state_reader(path) if self.state_reader else None
+        # Without a reader this adapter cannot observe post-run state at all.
+        # UNREADABLE says so; None would be taken as "unchanged" and reported as
+        # a defence the policy never actually provided.
+        return self.state_reader(path) if self.state_reader else UNREADABLE
 
     def invoke(self, user_prompt: str, injected_context: dict | None = None) -> AgentRun:
         prompt = user_prompt

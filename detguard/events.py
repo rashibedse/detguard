@@ -23,6 +23,38 @@ SEVERITIES = ("low", "medium", "high", "critical")
 SEVERITY_RANK = {name: i for i, name in enumerate(SEVERITIES)}
 
 
+class Unreadable:
+    """Type of the :data:`UNREADABLE` sentinel. Not for instantiation."""
+
+    _instance: "Unreadable | None" = None
+
+    def __new__(cls) -> "Unreadable":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return "UNREADABLE"
+
+    def __bool__(self) -> bool:
+        return False
+
+
+#: Returned by ``BaseAdapter.get_state`` when a path cannot be read *at all* —
+#: no reader was configured for it, or it does not resolve.
+#:
+#: It lives here rather than in the adapter package because the runner has to
+#: recognise it, and core does not import from ``adapters``.
+#:
+#: It exists because ``None`` was doing two jobs. A ``field_changed`` check
+#: comparing ``None != None`` concludes the state did not change, and the runner
+#: records that as the attack having failed — which the report presents as a
+#: defence. So an adapter that simply cannot see the state produced the same
+#: output as an agent that was successfully blocked, and a real breach could sit
+#: in a report as a green row. "I cannot answer" is not "no".
+UNREADABLE = Unreadable()
+
+
 @dataclass
 class ToolCall:
     """One tool invocation.

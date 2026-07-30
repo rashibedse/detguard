@@ -94,6 +94,11 @@ def build(
         "exit_code": baseline_mod.EXIT_OK,
     }
 
+    # Coverage before conclusions. Every caveat below is derived from what the
+    # run could not observe, and a reader who sees the defense rate first has
+    # already formed a view by the time they reach the caveats.
+    report["measurement"] = _measurement(results, unguarded)
+
     # The guarded-vs-unguarded delta is the honest measure of what the policy
     # bought. A defense rate on its own says nothing without knowing how many
     # of these the agent would have fallen for unaided.
@@ -103,6 +108,9 @@ def build(
             "unguarded_breaches": unguarded_breaches,
             "guarded_breaches": len(breaches),
             "prevented": max(0, unguarded_breaches - len(breaches)),
+            # A delta computed from a zero baseline is arithmetically fine and
+            # evidentially worthless. Flagged here so no consumer has to infer it.
+            "meaningful": unguarded_breaches > 0,
         }
 
     if baseline is not None:
@@ -118,6 +126,87 @@ def _rank(severity: str) -> int:
     return {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(severity, 4)
 
 
+def _measurement(results: dict, unguarded: dict | None) -> dict:
+    """What this run was and was not able to observe.
+
+    A report whose headline is a defense rate invites one question — is it real?
+    — and until now the document had no way to answer it. Two conditions make a
+    number unreadable rather than merely unflattering:
+
+    * attacks detguard could not evaluate at all (``inconclusive``);
+    * an unguarded baseline of zero, which means no attack in the corpus landed
+      even with enforcement off, so the policy was never asked to do anything.
+
+    Both are stated as warnings with their causes, because "we could not tell"
+    is a finding a client is entitled to, and burying it is how a guardrail comes
+    to be trusted for reasons that were never established.
+    """
+    from .runner import REASON_TEXT
+
+    summary = results.get("summary") or {}
+    total = int(summary.get("total") or 0)
+    inconclusive = int(summary.get("inconclusive") or 0)
+    by_cause = dict(summary.get("inconclusive_by_cause") or {})
+
+    warnings: list[dict] = []
+    if inconclusive:
+        warnings.append(
+            {
+                "kind": "INCOMPLETE_MEASUREMENT",
+                "detail": (
+                    f"{inconclusive} of {total} attack(s) could not be evaluated. "
+                    "These are counted as neither defended nor breached, because "
+                    "detguard could not observe the outcome."
+                ),
+                "causes": [
+                    {
+                        "code": code,
+                        "count": count,
+                        "explanation": REASON_TEXT.get(code, ""),
+                    }
+                    for code, count in sorted(by_cause.items())
+                ],
+            }
+        )
+
+    if unguarded is not None:
+        unguarded_breaches = sum(1 for r in unguarded.get("results", []) if r.get("succeeded"))
+        if unguarded_breaches == 0:
+            warnings.append(
+                {
+                    "kind": "POLICY_NOT_EXERCISED",
+                    "detail": (
+                        "No attack succeeded with the guardrail OFF, so this run "
+                        "does not show what enforcement prevented. The defense "
+                        "rate below is not evidence that the policy works — the "
+                        "agent, the model, or the harness stopped everything "
+                        "before the policy was consulted."
+                    ),
+                    "causes": [
+                        {
+                            "code": "unguarded_baseline_zero",
+                            "count": int((unguarded.get("summary") or {}).get("total") or 0),
+                            "explanation": (
+                                "Check the unguarded run's own inconclusive count "
+                                "first: an unmeasurable baseline and a genuinely "
+                                "safe agent look identical here."
+                            ),
+                        }
+                    ],
+                }
+            )
+
+    return {
+        "coverage": summary.get("coverage", 1.0 if total else 0.0),
+        "evaluated": total - inconclusive,
+        "total": total,
+        "inconclusive": inconclusive,
+        "inconclusive_by_cause": by_cause,
+        "warnings": warnings,
+        "trustworthy": not warnings,
+    }
+
+
 def write(report: dict, path: str | Path) -> Path:
     p = Path(path)
     if p.parent and str(p.parent) != ".":
@@ -129,23 +218,56 @@ def write(report: dict, path: str | Path) -> Path:
 def to_markdown(report: dict) -> str:
     """Render the report for a PR comment or a CI job summary."""
     s = report.get("summary", {})
-    lines = [
-        "## detguard",
-        "",
+    measurement = report.get("measurement") or {}
+    lines = ["## detguard", ""]
+
+    # Caveats first, deliberately. A reader who meets the defense rate before the
+    # warning has already drawn a conclusion the warning then has to undo.
+    for warning in measurement.get("warnings") or []:
+        lines += [f"> ⚠️ **{warning['kind'].replace('_', ' ').title()}** — {warning['detail']}", ">"]
+        for cause in warning.get("causes") or []:
+            lines.append(f">   - `{cause['code']}` ×{cause['count']} — {cause['explanation']}")
+        lines.append("")
+
+    lines += [
         f"**{s.get('succeeded', 0)}** succeeded · "
         f"**{s.get('blocked', 0)}** blocked · "
         f"**{s.get('requires_approval', 0)}** held for approval · "
         f"defense rate **{s.get('defense_rate', 0):.1%}**",
         "",
+    ]
+
+    if measurement:
+        lines += [
+            f"Measured **{measurement.get('evaluated', 0)}** of "
+            f"{measurement.get('total', 0)} attacks "
+            f"(coverage **{measurement.get('coverage', 0):.1%}**)"
+            + (
+                f" · {measurement['inconclusive']} inconclusive"
+                if measurement.get("inconclusive")
+                else ""
+            ),
+            "",
+        ]
+
+    lines += [
         f"`policy {report.get('policy_hash', '')[:12]}` · adapter `{report.get('adapter', '')}`",
         "",
     ]
 
     delta = report.get("delta")
-    if delta:
+    if delta and delta.get("meaningful"):
         lines += [
             f"Enforcement prevented **{delta['prevented']}** of "
             f"{delta['unguarded_breaches']} attacks that succeed unguarded.",
+            "",
+        ]
+    elif delta:
+        # The old text here read "prevented 0 of 0 attacks", which states a fact
+        # and implies a conclusion the run cannot support.
+        lines += [
+            "Enforcement delta **not measurable**: no attack succeeded unguarded, "
+            "so there is nothing this policy can be shown to have prevented.",
             "",
         ]
 
