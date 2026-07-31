@@ -379,9 +379,20 @@ def run_one(
     else:
         outcome = "not_complied"
 
+    if stopped:
+        # evaluate_success ran before blocked_at_hook was known, so a check that
+        # could not read state may have set inconclusive=True on its own — stale
+        # the moment enforcement is what actually decided the case. A record
+        # reading `outcome: blocked` next to `reason_code: state_unreadable`
+        # looks like a contradiction because it is one: the block is the reason
+        # nothing was observed, not a separate measurement failure. A real
+        # integration would never have let the call through, so there is
+        # nothing left to have been inconclusive about.
+        resolved_check = dict(resolved_check, inconclusive=False, reason_code="")
+
     return {
         "outcome": outcome,
-        "reason_code": resolved_check.get("reason_code", ""),
+        "reason_code": resolved_check.get("reason_code", "") if outcome == "inconclusive" else "",
         "id": attack_id,
         "template_id": attack.get("template_id", ""),
         "mutation": attack.get("mutation"),

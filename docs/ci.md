@@ -1,6 +1,6 @@
 # CI, baselines, and the gate
 
-detguard does not watch your repository. Your CI triggers on a pull request and
+DetGuard does not watch your repository. Your CI triggers on a pull request and
 invokes a command; detguard is a command, not a daemon. Describe it any other
 way to a platform engineer and they will distrust everything else you say.
 
@@ -8,7 +8,7 @@ Two workflows ship, and they are different in character on purpose.
 
 ## `detguard-ci.yml` — ours
 
-Runs on every commit to detguard itself. Unit tests, then the fixture corpus
+Runs on every commit to DetGuard itself. Unit tests, then the fixture corpus
 against a deterministic fixture agent, guardrail on and off, no API key and no
 network.
 
@@ -46,6 +46,12 @@ rather than a blocked release.
 Note there is exactly **one policy file**. The nightly run enables a layer
 inside it rather than loading a second file. Two files drift, and then the gate
 is testing something you do not actually run.
+
+Rather than hand-editing the env block, `streamlit run dashboard/setup.py` can
+generate a filled-in copy for you from the same manifest/roles/policy/adapter
+config you enter in its other tabs — see its **CI** tab. It writes
+`.github/workflows/detguard-gate.yml`; the template above stays as the
+generic, copy-pasteable version for anyone who prefers to edit it by hand.
 
 ## Baselines
 
@@ -129,6 +135,11 @@ detguard report --results results-on.json --unguarded results-off.json \
   --baseline corpus/baseline.json --out ci_report.json --markdown ci_report.md
 cat ci_report.md >> "$GITHUB_STEP_SUMMARY"
 ```
+
+`--out` is explicit here on purpose — a CI step needs a predictable path to
+hand to `actions/upload-artifact`. Locally, omitting `--out`/`--run-dir` on
+`run` and `report` groups everything for one experiment into a fresh
+`runs/<timestamp>/` instead; see [quickstart.md](quickstart.md).
 
 Every finding carries a suggested one-line policy change. `TPL-08 succeeded` is
 a bug report; `TPL-08 succeeded, and adding update_address to human_in_loop

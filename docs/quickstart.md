@@ -14,7 +14,7 @@ detguard --help
 
 > If `detguard` is not on your `PATH` after install (common on Windows, where
 > pip puts it in `%APPDATA%\Python\Python3xx\Scripts`), use `python -m
-> detguard.cli` in place of `detguard` for every command below. It is the same
+> detguard` in place of `detguard` for every command below. It is the same
 > entry point.
 
 ## 1. Build a corpus from a manifest
@@ -24,8 +24,8 @@ agent has, so nobody writes attacks by hand:
 
 ```bash
 detguard corpus build \
-  --manifest tests/fixture_manifest.yaml \
-  --roles tests/fixture_roles.yaml \
+  --manifest examples/banking_agent/manifest.yaml \
+  --roles examples/banking_agent/roles.yaml \
   --out corpus/attacks
 ```
 
@@ -41,23 +41,33 @@ reason. Skipped templates are coverage information, never a silent drop.
 Once with the guardrail off, to find out what the agent does unaided:
 
 ```bash
-detguard run --corpus corpus/attacks --policy tests/fixture_policy.yaml \
-  --agent tests.fixture_agent:FixtureAgent --guardrail off --out results-off.json
+detguard run --corpus corpus/attacks --policy examples/banking_agent/policy.yaml \
+  --agent examples.banking_agent.agent:FixtureAgent --guardrail off --run-dir runs/demo
 ```
 
 Once with it on:
 
 ```bash
-detguard run --corpus corpus/attacks --policy tests/fixture_policy.yaml \
-  --agent tests.fixture_agent:FixtureAgent --guardrail on --out results-on.json
+detguard run --corpus corpus/attacks --policy examples/banking_agent/policy.yaml \
+  --agent examples.banking_agent.agent:FixtureAgent --guardrail on --run-dir runs/demo
 ```
+
+Neither command needs `--out`: results go to `runs/demo/results-off.json` and
+`runs/demo/results-on.json`, and a `run.yaml` records what produced them —
+corpus, policy, adapter, everything needed to reproduce the run six weeks
+later. `--run-dir` is what keeps a guarded/unguarded pair together; omit it
+and each invocation gets its own fresh `runs/<timestamp>/` instead.
 
 ## 3. Get the report
 
 ```bash
-detguard report --results results-on.json --unguarded results-off.json \
-  --out ci_report.json --markdown ci_report.md
+detguard report --results runs/demo/results-on.json \
+  --unguarded runs/demo/results-off.json
 ```
+
+`ci_report.json` and `ci_report.md` default into the same directory as
+`--results` — `runs/demo/` here — so the whole run stays in one place. Pass
+`--out`/`--markdown` explicitly to put them somewhere else.
 
 ```
 **1** succeeded · **30** blocked · **4** held for approval · defense rate **94.4%**
@@ -94,7 +104,27 @@ config error — which is all a CI gate needs. Copy
 
 ## Point it at your own agent
 
-Three things, in this order.
+Three ways, fastest first.
+
+**`detguard scaffold`** reads your agent's source and writes the whole
+integration — adapter, manifest, roles, policy, CI workflow:
+
+```bash
+export DETGUARD_API_KEY=...
+detguard scaffold --source-dir . --entry agent:run_agent
+```
+
+Use this when your agent is **not** on a framework detguard already adapts —
+a hand-rolled loop, raw OpenAI function calling, anything where you would
+otherwise write an adapter by hand. See [scaffold.md](scaffold.md) for what is
+generated versus derived, and why the output is a draft rather than an answer.
+
+**`streamlit run dashboard/setup.py`** walks through manifest, roles, policy,
+run commands and CI as forms that validate before they write, with tool lists
+pre-populated by the same discovery cascade `detguard init` uses. Use this when
+you want to author the config yourself with guardrails on the editing.
+
+**By hand** — the rest of this section. Three things, in this order.
 
 **A manifest.** The names and argument schemas of your tools — no source code.
 Start from a skeleton and fill it in, or let an adapter draft it:
@@ -116,7 +146,7 @@ This is the artifact everything else keys off.
 is the universal fallback.
 
 On LangGraph you can skip the factory entirely — pass the graph and the reset
-hook as import strings and detguard builds the adapter itself:
+hook as import strings and DetGuard builds the adapter itself:
 
 ```bash
 detguard init --framework langgraph --graph agent.graph:graph \

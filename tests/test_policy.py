@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
+import detguard
 from detguard.events import GuardContext, ToolCall
 from detguard.policy import PolicyError, evaluate, load, loads
 
-REPO = Path(__file__).resolve().parent.parent
+DEFAULT_POLICY_PATH = Path(detguard.__file__).resolve().parent / "policies" / "default.yaml"
 
 
 def minimal(**overrides) -> dict:
@@ -54,14 +55,14 @@ def test_layer_defaults_to_the_condition_name():
 
 
 def test_shipped_default_policy_loads():
-    policy = load(REPO / "detguard" / "policies" / "default.yaml")
+    policy = load(DEFAULT_POLICY_PATH)
     assert policy.rules
     assert policy.policy_hash, "a loaded policy must carry a hash for provenance"
 
 
 def test_llm_judge_ships_disabled_in_the_default_policy():
     """No LLM in the enforcement path. This is a hard invariant, not a default."""
-    policy = load(REPO / "detguard" / "policies" / "default.yaml")
+    policy = load(DEFAULT_POLICY_PATH)
     judges = [r for r in policy.rules if r.condition == "llm_judge"]
     assert judges, "the default policy should carry an llm_judge rule to enable later"
     assert all(not r.enabled for r in judges)
@@ -69,7 +70,7 @@ def test_llm_judge_ships_disabled_in_the_default_policy():
 
 def test_enable_layer_switches_on_a_disabled_rule():
     policy = load(
-        REPO / "detguard" / "policies" / "default.yaml", enable_layers=["llm_judge"]
+        DEFAULT_POLICY_PATH, enable_layers=["llm_judge"]
     )
     judges = [r for r in policy.rules if r.condition == "llm_judge"]
     assert all(r.enabled for r in judges)

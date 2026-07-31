@@ -1,6 +1,6 @@
 # Integration
 
-detguard is a library you call, not a service that watches you. There is no
+DetGuard is a library you call, not a service that watches you. There is no
 daemon, no agent-side sidecar, and no network call. It is a command and four
 functions, which is the whole reason it can run inside a regulated network.
 
@@ -165,7 +165,7 @@ the directory you run from; detguard constructs the `LangGraphAdapter` itself.
 
 #### How tools are found
 
-You do not have to tell detguard what your tools are. It tries four sources, in
+You do not have to tell DetGuard what your tools are. It tries four sources, in
 order, and stops at the first that yields any:
 
 | Order | Source | Reported as |
@@ -259,7 +259,7 @@ optional — without fresh state per attack, results leak between cases and ever
 number in the report is meaningless.
 
 LangGraph already ships `interrupt()`, which is a perfectly good HITL
-mechanism. detguard is not replacing it. The difference is that a
+mechanism. DetGuard is not replacing it. The difference is that a
 policy-defined gate is versioned, reviewed, regression-tested, and comes with a
 measured false-positive rate.
 
@@ -280,10 +280,10 @@ Requires `pip install "detguard[openai]"`. The manifest is drafted from the
 SDK's own JSON Schema per tool — the same artifact you would publish in your
 API docs, and the reason onboarding never needs your source.
 
-## What detguard never does
+## What DetGuard never does
 
 - Call out to a network service during enforcement
 - Put a model in the enforcement path (`llm_judge` ships `enabled: false`)
-- Execute a tool, ever — your code does that; detguard reads the result
+- Execute a tool, ever — your code does that; DetGuard reads the result
 - Modify your policy file
 - Send anything anywhere

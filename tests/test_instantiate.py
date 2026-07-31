@@ -30,8 +30,8 @@ from detguard.instantiate import (
 from detguard.manifest import parse_manifest, parse_roles
 
 REPO = Path(__file__).resolve().parent.parent
-FIXTURE_MANIFEST = REPO / "tests" / "fixture_manifest.yaml"
-FIXTURE_ROLES = REPO / "tests" / "fixture_roles.yaml"
+FIXTURE_MANIFEST = REPO / "examples" / "banking_agent" / "manifest.yaml"
+FIXTURE_ROLES = REPO / "examples" / "banking_agent" / "roles.yaml"
 
 
 def fixture_pair():

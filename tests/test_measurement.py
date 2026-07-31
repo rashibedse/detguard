@@ -30,15 +30,15 @@ from detguard.runner import (
     run,
 )
 
-from .fixture_agent import FixtureAgent
+from examples.banking_agent.agent import FixtureAgent
 
 
 @pytest.fixture(scope="module")
 def corpus(tmp_path_factory):
     out = tmp_path_factory.mktemp("attacks")
     build(
-        manifest_path="tests/fixture_manifest.yaml",
-        roles_path="tests/fixture_roles.yaml",
+        manifest_path="examples/banking_agent/manifest.yaml",
+        roles_path="examples/banking_agent/roles.yaml",
         out_dir=str(out),
     )
     return load_corpus(str(out))
@@ -46,7 +46,7 @@ def corpus(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def policy():
-    return load_policy("tests/fixture_policy.yaml")
+    return load_policy("examples/banking_agent/policy.yaml")
 
 
 class BlindReturningNone(FixtureAgent):

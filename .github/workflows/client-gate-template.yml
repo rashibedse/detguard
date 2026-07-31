@@ -14,6 +14,9 @@
 # somebody a look rather than a blocked release.
 #
 # Nothing here phones home. Your corpus, your baseline, your results, your repo.
+#
+# `dashboard/setup.py` can generate a filled-in copy of this file for you —
+# see its CI tab — rather than you hand-editing the env block below.
 
 name: detguard
 
@@ -24,10 +27,24 @@ on:
   workflow_dispatch:
 
 env:
+  DETGUARD_MANIFEST: guardrail/manifest.yaml
+  DETGUARD_ROLES: guardrail/roles.yaml
   DETGUARD_POLICY: guardrail/policy.yaml
   DETGUARD_CORPUS: corpus/attacks
-  # module:factory returning your configured BaseAdapter
+
+  # Pick ONE adapter path and leave the other block's variables empty.
+  #
+  # generic / openai_agents — a factory you wrote, module:function returning a
+  # configured BaseAdapter:
+  DETGUARD_ADAPTER: generic
   DETGUARD_AGENT: myapp.detguard_adapter:build_adapter
+  #
+  # langgraph — no factory needed, detguard builds the adapter from your graph:
+  # DETGUARD_ADAPTER: langgraph
+  # DETGUARD_GRAPH: myapp.graph:graph
+  # DETGUARD_RESET: myapp.db:seed
+  # DETGUARD_TOOLS: ""              # only if automatic discovery guesses wrong
+  # DETGUARD_STATE_READER: ""       # only if success checks read post-run state
 
 jobs:
   # -------------------------------------------------------------------------
@@ -56,43 +73,48 @@ jobs:
       - name: Rebuild corpus from the manifest
         run: |
           detguard corpus build \
-            --manifest guardrail/manifest.yaml \
-            --roles guardrail/roles.yaml \
+            --manifest "$DETGUARD_MANIFEST" \
+            --roles "$DETGUARD_ROLES" \
             --out "$DETGUARD_CORPUS"
 
       - name: Run the PR subset
         run: |
+          ADAPTER_ARGS=(--adapter "$DETGUARD_ADAPTER")
+          if [ "$DETGUARD_ADAPTER" = "langgraph" ] && [ -n "$DETGUARD_GRAPH" ]; then
+            ADAPTER_ARGS+=(--graph "$DETGUARD_GRAPH" --reset "$DETGUARD_RESET")
+            [ -n "$DETGUARD_TOOLS" ] && ADAPTER_ARGS+=(--tools "$DETGUARD_TOOLS")
+            [ -n "$DETGUARD_STATE_READER" ] && ADAPTER_ARGS+=(--state-reader "$DETGUARD_STATE_READER")
+          else
+            ADAPTER_ARGS+=(--agent "$DETGUARD_AGENT")
+          fi
           detguard run \
             --corpus "$DETGUARD_CORPUS" \
             --policy "$DETGUARD_POLICY" \
-            --agent "$DETGUARD_AGENT" \
+            "${ADAPTER_ARGS[@]}" \
             --guardrail on \
             --pr-subset \
-            --out results.json
+            --run-dir runs/pr
 
       - name: Compare against the baseline
         run: |
           detguard baseline compare \
-            --results results.json \
+            --results runs/pr/results-on.json \
             --baseline corpus/baseline.json
 
       - name: Report
         if: always()
         run: |
           detguard report \
-            --results results.json \
+            --results runs/pr/results-on.json \
             --baseline corpus/baseline.json \
-            --out ci_report.json \
-            --markdown ci_report.md
-          cat ci_report.md >> "$GITHUB_STEP_SUMMARY"
+            --run-dir runs/pr
+          cat runs/pr/ci_report.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: detguard-pr
-          path: |
-            results.json
-            ci_report.*
+          path: runs/pr/
 
   # -------------------------------------------------------------------------
   # Nightly. Full corpus, model-based layer on, never blocking.
@@ -118,8 +140,8 @@ jobs:
       - name: Rebuild corpus
         run: |
           detguard corpus build \
-            --manifest guardrail/manifest.yaml \
-            --roles guardrail/roles.yaml \
+            --manifest "$DETGUARD_MANIFEST" \
+            --roles "$DETGUARD_ROLES" \
             --out "$DETGUARD_CORPUS"
 
       # One policy file. The nightly run enables a layer inside it rather than
@@ -129,49 +151,63 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
+          ADAPTER_ARGS=(--adapter "$DETGUARD_ADAPTER")
+          if [ "$DETGUARD_ADAPTER" = "langgraph" ] && [ -n "$DETGUARD_GRAPH" ]; then
+            ADAPTER_ARGS+=(--graph "$DETGUARD_GRAPH" --reset "$DETGUARD_RESET")
+            [ -n "$DETGUARD_TOOLS" ] && ADAPTER_ARGS+=(--tools "$DETGUARD_TOOLS")
+            [ -n "$DETGUARD_STATE_READER" ] && ADAPTER_ARGS+=(--state-reader "$DETGUARD_STATE_READER")
+          else
+            ADAPTER_ARGS+=(--agent "$DETGUARD_AGENT")
+          fi
           detguard run \
             --corpus "$DETGUARD_CORPUS" \
             --policy "$DETGUARD_POLICY" \
-            --agent "$DETGUARD_AGENT" \
+            "${ADAPTER_ARGS[@]}" \
             --guardrail on \
             --enable-layer llm_judge \
             --audit-log audit.jsonl \
-            --out results-nightly.json
+            --run-dir runs/nightly
 
       - name: Same corpus, guardrail off
         run: |
+          ADAPTER_ARGS=(--adapter "$DETGUARD_ADAPTER")
+          if [ "$DETGUARD_ADAPTER" = "langgraph" ] && [ -n "$DETGUARD_GRAPH" ]; then
+            ADAPTER_ARGS+=(--graph "$DETGUARD_GRAPH" --reset "$DETGUARD_RESET")
+            [ -n "$DETGUARD_TOOLS" ] && ADAPTER_ARGS+=(--tools "$DETGUARD_TOOLS")
+            [ -n "$DETGUARD_STATE_READER" ] && ADAPTER_ARGS+=(--state-reader "$DETGUARD_STATE_READER")
+          else
+            ADAPTER_ARGS+=(--agent "$DETGUARD_AGENT")
+          fi
           detguard run \
             --corpus "$DETGUARD_CORPUS" \
             --policy "$DETGUARD_POLICY" \
-            --agent "$DETGUARD_AGENT" \
+            "${ADAPTER_ARGS[@]}" \
             --guardrail off \
-            --out results-nightly-off.json
+            --run-dir runs/nightly
 
       - name: Report with the guarded/unguarded delta
         run: |
           detguard report \
-            --results results-nightly.json \
-            --unguarded results-nightly-off.json \
+            --results runs/nightly/results-on.json \
+            --unguarded runs/nightly/results-off.json \
             --baseline corpus/baseline.json \
-            --out ci_report-nightly.json \
-            --markdown ci_report-nightly.md
-          cat ci_report-nightly.md >> "$GITHUB_STEP_SUMMARY"
+            --run-dir runs/nightly
+          cat runs/nightly/ci_report.md >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: detguard-nightly
           path: |
-            results-nightly*.json
-            ci_report-nightly.*
-            audit.jsonl
+            runs/nightly/
             corpus/attacks/
 
 # After a deliberate policy change, re-record the baseline and commit it:
 #
 #   detguard run --corpus corpus/attacks --policy guardrail/policy.yaml \
-#     --agent "$DETGUARD_AGENT" --guardrail on --out results.json
-#   detguard baseline snapshot --results results.json --out corpus/baseline.json
+#     --agent "$DETGUARD_AGENT" --guardrail on --run-dir runs/baseline
+#   detguard baseline snapshot --results runs/baseline/results-on.json \
+#     --out corpus/baseline.json
 #
 # Reviewing that diff is the point. It is the moment somebody has to look at a
 # gap and decide, in writing, that it is acceptable.

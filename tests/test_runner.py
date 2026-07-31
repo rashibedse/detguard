@@ -20,7 +20,7 @@ from detguard.policy import load, loads
 from detguard.runner import RunnerError, evaluate_success, filter_attacks, run, run_one
 
 REPO = Path(__file__).resolve().parent.parent
-FIXTURE_POLICY = REPO / "tests" / "fixture_policy.yaml"
+FIXTURE_POLICY = REPO / "examples" / "banking_agent" / "policy.yaml"
 
 
 class CountingAdapter(BaseAdapter):

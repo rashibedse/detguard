@@ -57,7 +57,22 @@ def load_results(path: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def discover(directory: str) -> list[str]:
-    return sorted(glob.glob(os.path.join(directory, "*.json")))
+    # Narrowed to results files specifically: a run directory now also holds
+    # ci_report.json and run.yaml by default, and neither parses as a results
+    # document — to_frame would either choke on them or silently render an
+    # empty run.
+    return sorted(glob.glob(os.path.join(directory, "results*.json")))
+
+
+def newest_run_dir() -> str | None:
+    """The most recently created ``runs/<timestamp>/``, if any exist.
+
+    ``detguard run`` writes here by default now, so this is where a client's
+    latest evidence actually lives — pointing the dashboard at ``.`` by default
+    would show nothing for anyone who hasn't overridden that with ``--out``.
+    """
+    candidates = sorted(glob.glob(os.path.join("runs", "*")), key=os.path.getmtime)
+    return candidates[-1] if candidates else None
 
 
 def to_frame(run: dict) -> pd.DataFrame:
@@ -105,18 +120,21 @@ def layer_for(run: dict, blocked_by: str) -> str:
 st.sidebar.title("🛡 detguard")
 st.sidebar.caption("Policy-as-code for agent tool calls")
 
-directory = st.sidebar.text_input("Results directory", value=".")
+default_directory = newest_run_dir() or "."
+directory = st.sidebar.text_input("Results directory", value=default_directory)
 available = discover(directory)
 
 if not available:
     st.title("detguard")
-    st.warning(f"No `*.json` files in `{os.path.abspath(directory)}`.")
+    st.warning(f"No `results*.json` files in `{os.path.abspath(directory)}`.")
     st.markdown(
         "Produce some with:\n\n"
         "```bash\n"
         "detguard run --corpus corpus/attacks --policy policy.yaml \\\n"
-        "  --agent tests.fixture_agent:FixtureAgent --guardrail on --out results-on.json\n"
-        "```"
+        "  --agent examples.banking_agent.agent:FixtureAgent --guardrail on\n"
+        "```\n\n"
+        "That writes into a fresh `runs/<timestamp>/` by default — point "
+        "the field above at it, or pass `--run-dir` to choose where."
     )
     st.stop()
 

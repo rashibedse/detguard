@@ -45,6 +45,12 @@ dashboard = [
     "streamlit>=1.36",
     "pandas>=2.0",
 ]
+# `detguard scaffold` only. Enforcement never imports either SDK — see the
+# note in authoring.py on why generation is authoring-time, not runtime.
+authoring = [
+    "anthropic>=0.40",
+    "openai>=1.40",
+]
 dev = [
     "pytest>=8.0",
 ]
@@ -53,18 +59,19 @@ dev = [
 detguard = "detguard.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["detguard"]
+packages = ["src/detguard"]
 # Templates and the default policy ship with the package. This matters:
 # the corpus IS the product, and it must be importable from an installed wheel.
 artifacts = [
-    "detguard/templates/*.yaml",
-    "detguard/policies/*.yaml",
-    "detguard/policies/*.md",
+    "src/detguard/templates/*.yaml",
+    "src/detguard/policies/*.yaml",
+    "src/detguard/policies/*.md",
 ]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/detguard",
+    "/src",
+    "/examples",
     "/tests",
     "/docs",
     "/dashboard",

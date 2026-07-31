@@ -63,13 +63,13 @@ jobs:
       - name: Build corpus (twice, and diff)
         run: |
           detguard corpus build \
-            --manifest tests/fixture_manifest.yaml \
-            --roles tests/fixture_roles.yaml \
+            --manifest examples/banking_agent/manifest.yaml \
+            --roles examples/banking_agent/roles.yaml \
             --out corpus/attacks
           cp -r corpus/attacks /tmp/first
           detguard corpus build \
-            --manifest tests/fixture_manifest.yaml \
-            --roles tests/fixture_roles.yaml \
+            --manifest examples/banking_agent/manifest.yaml \
+            --roles examples/banking_agent/roles.yaml \
             --out corpus/attacks
           diff -r /tmp/first corpus/attacks
 
@@ -77,8 +77,8 @@ jobs:
         run: |
           detguard run \
             --corpus corpus/attacks \
-            --policy tests/fixture_policy.yaml \
-            --agent tests.fixture_agent:FixtureAgent \
+            --policy examples/banking_agent/policy.yaml \
+            --agent examples.banking_agent.agent:FixtureAgent \
             --guardrail off \
             --out results-off.json
 
@@ -86,8 +86,8 @@ jobs:
         run: |
           detguard run \
             --corpus corpus/attacks \
-            --policy tests/fixture_policy.yaml \
-            --agent tests.fixture_agent:FixtureAgent \
+            --policy examples/banking_agent/policy.yaml \
+            --agent examples.banking_agent.agent:FixtureAgent \
             --guardrail on \
             --out results-on.json
 
