@@ -56,8 +56,15 @@ def build(
     results: dict,
     baseline: dict | None = None,
     unguarded: dict | None = None,
+    allow_unmeasured: bool = False,
 ) -> dict:
-    """Assemble the CI report."""
+    """Assemble the CI report.
+
+    ``allow_unmeasured`` downgrades "this run could not observe itself" from a
+    failure to a warning. It exists because the alternative is worse: a gate
+    that reports provider flakiness with the same exit code as a security
+    regression gets muted, and then the regressions go unread too.
+    """
     summary = dict(results.get("summary") or {})
     breaches = [r for r in results.get("results", []) if r.get("succeeded")]
     approvals = [r for r in results.get("results", []) if r.get("outcome") == "approval_required"]
@@ -113,14 +120,25 @@ def build(
 
     # Applied last so a clean baseline comparison cannot paper over it: a run
     # that could not observe its own outcomes is not "passing" merely because
-    # nothing it managed to measure looks like a regression. There is no exit
-    # code reserved for "cannot certify" in the current three-value contract
-    # (0/1/2), so this reuses EXIT_REGRESSION rather than
-    # silently inventing a fourth; `measurement.trustworthy` and its warnings
-    # are what a caller reads to tell "policy regressed" from "could not tell".
+    # nothing it managed to measure looks like a regression.
+    #
+    # It reports EXIT_UNMEASURED rather than EXIT_REGRESSION, and never
+    # downgrades a real regression that was already found. The two used to
+    # share code 1, which meant a flaky provider failed a merge gate exactly
+    # like a policy regression — indistinguishable to CI, and the predictable
+    # response to a gate that cries wolf is to stop reading it.
     if not report["measurement"]["trustworthy"]:
-        report["passed"] = False
-        report["exit_code"] = max(report["exit_code"], baseline_mod.EXIT_REGRESSION)
+        report["unmeasured"] = True
+        if allow_unmeasured:
+            report.setdefault("warnings", []).append(
+                "run was not fully measurable; failure suppressed by --allow-unmeasured"
+            )
+        else:
+            report["passed"] = False
+            if report["exit_code"] == baseline_mod.EXIT_OK:
+                report["exit_code"] = baseline_mod.EXIT_UNMEASURED
+    else:
+        report["unmeasured"] = False
 
     return report
 
@@ -313,9 +331,30 @@ def to_markdown(report: dict) -> str:
         f"**{s.get('succeeded', 0)}** succeeded · "
         f"**{s.get('blocked', 0)}** blocked · "
         f"**{s.get('requires_approval', 0)}** held for approval · "
+        f"**{s.get('mitigated', 0)}** mitigated · "
         f"defense rate **{s.get('defense_rate', 0):.1%}**",
         "",
     ]
+
+    # Stated before any of the numbers are interpreted. "Blocked" means two
+    # very different things depending on this, and a reader who is not told
+    # will assume the stronger one.
+    if s.get("enforcement") == "detected":
+        lines += [
+            "> ⚠️ **Detection, not prevention.** This adapter offers no "
+            "pre-execution seam, so tool hooks ran after the agent had already "
+            "completed its turn. A `blocked` row means the policy *would* have "
+            "stopped the call in a live integration — the side effect has "
+            "already happened here.",
+            "",
+        ]
+    elif s.get("enforcement") == "mixed":
+        lines += [
+            f"> ℹ️ **Mixed enforcement.** {s.get('prevented_attacks', 0)} of "
+            f"{s.get('total', 0)} attacks were intercepted before execution; "
+            "the rest were evaluated after the fact.",
+            "",
+        ]
 
     if measurement:
         lines += [

@@ -220,9 +220,25 @@ def test_a_hard_block_outranks_a_hitl_pause_at_equal_severity():
     document["rules"][0]["severity"] = "critical"
     document["rules"][0]["action"] = "require_hitl"
     verdict = evaluate(loads(document), GuardContext(hook="before_input", text="x"))
-    # HUMAN: verify — at equal severity a hard block is reported over a HITL
-    # pause, on the grounds that the stricter outcome is the honest headline.
+    # At equal severity a hard block is reported over a HITL pause, on the
+    # grounds that the stricter outcome is the honest headline — and
+    # `requires_approval` has to follow that choice rather than contradict it.
+    # It previously ORed over every fired rule, so the HITL rule that *lost*
+    # blocker selection still relabelled the verdict "awaiting a human", which
+    # is a softer claim than the block that actually decided the case.
     assert verdict.blocked_by == "critical_rule"
+    assert verdict.requires_approval is False
+    # The weaker fact is kept, just not allowed to overwrite the outcome.
+    assert verdict.hitl_also_fired is True
+
+
+def test_requires_approval_when_the_hitl_rule_is_the_one_that_wins():
+    """The flag is not merely suppressed — it tracks the winning rule."""
+    document = two_blockers()
+    document["rules"] = [document["rules"][0]]
+    document["rules"][0]["action"] = "require_hitl"
+    verdict = evaluate(loads(document), GuardContext(hook="before_input", text="x"))
+    assert not verdict.allow
     assert verdict.requires_approval is True
 
 

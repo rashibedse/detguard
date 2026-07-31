@@ -16,6 +16,7 @@ arguments and never re-runs anything.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Callable
 
 from .base import AgentRun, BaseAdapter
@@ -43,7 +44,7 @@ class GenericAdapter(BaseAdapter):
         self.final_output = final_output
         self.descriptions = dict(descriptions or {})
         self._state: dict = dict(state or {})
-        self._initial: dict = _deep_copy(self._state)
+        self._initial: dict = deepcopy(self._state)
 
     # -- contract ----------------------------------------------------------
 
@@ -95,7 +96,7 @@ class GenericAdapter(BaseAdapter):
         }
 
     def reset(self) -> None:
-        self._state = self.reset_state() if self.reset_state else _deep_copy(self._initial)
+        self._state = self.reset_state() if self.reset_state else deepcopy(self._initial)
 
     def invoke(self, user_prompt: str, injected_context: dict | None = None) -> AgentRun:
         decided = self.decide(user_prompt, injected_context, self.state) or []
@@ -153,9 +154,3 @@ def _type_name(annotation: Any) -> str:
     return getattr(annotation, "__name__", str(annotation))
 
 
-def _deep_copy(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _deep_copy(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_deep_copy(v) for v in value]
-    return value

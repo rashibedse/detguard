@@ -28,6 +28,10 @@ OUTCOME_COLOURS = {
     "breach": "#c0392b",
     "approval_required": "#e08e0b",
     "blocked": "#1f7a4d",
+    # A lighter green than `blocked`: the objective failed, but the call was
+    # still made and only its content was masked. Reading as identical to a
+    # hard block would overstate what happened.
+    "mitigated": "#5aa87a",
     "not_complied": "#7f8c8d",
     # Deliberately not green and not grey. An attack nobody could evaluate is a
     # hole in the evidence, and it should not read as a quiet pass.
@@ -37,6 +41,7 @@ OUTCOME_LABELS = {
     "breach": "Breach",
     "approval_required": "Held for approval",
     "blocked": "Blocked",
+    "mitigated": "Mitigated (content masked)",
     "not_complied": "Agent did not comply",
     "inconclusive": "Could not be evaluated",
 }
@@ -189,18 +194,21 @@ st.caption(
 )
 
 summary = guarded.get("summary", {})
-benign = view[view["check_type"] == "must_allow"]
 attacks_only = view[view["check_type"] != "must_allow"]
 
-false_positives = int((benign["outcome"] != "not_complied").sum()) if len(benign) else 0
-fp_rate = (false_positives / len(benign)) if len(benign) else None
 critical_gaps = int(((attacks_only["severity"] == "critical") & attacks_only["succeeded"]).sum())
 
 coverage = summary.get("coverage")
 inconclusive = int(summary.get("inconclusive") or 0)
 
-k1, k2, k3, k4, k5, k6 = st.columns(6)
-k1.metric("Defense rate", f"{summary.get('defense_rate', 0):.1%}")
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric(
+    "Defense rate",
+    f"{summary.get('defense_rate', 0):.1%}",
+    help="Hard blocks only. A HITL pause means a human may still say yes, so "
+    "it is reported separately as `containment_rate` rather than summed in "
+    "here — a maybe counted as a no inflates the one number everyone reads.",
+)
 k2.metric(
     "Coverage",
     f"{coverage:.1%}" if coverage is not None else "—",
@@ -208,16 +216,9 @@ k2.metric(
     "rate over low coverage is not a result — the rest were neither defended "
     "nor breached, they were simply unobserved.",
 )
-k3.metric(
-    "False-positive rate",
-    f"{fp_rate:.1%}" if fp_rate is not None else "—",
-    help="Measured against the benign suite. No benign corpus loaded means no "
-    "number — and a guardrail with an unmeasured FP rate eventually gets "
-    "switched off.",
-)
-k4.metric("Attacks run", int(len(attacks_only)))
-k5.metric("Critical gaps open", critical_gaps, delta_color="inverse")
-k6.metric("Policy", (guarded.get("policy_hash") or "—")[:12])
+k3.metric("Attacks run", int(len(attacks_only)))
+k4.metric("Critical gaps open", critical_gaps, delta_color="inverse")
+k5.metric("Policy", (guarded.get("policy_hash") or "—")[:12])
 
 if inconclusive:
     causes = summary.get("inconclusive_by_cause") or {}
@@ -229,12 +230,22 @@ if inconclusive:
         icon="⚠️",
     )
 
-if fp_rate is None:
+# Stated above every chart, because it changes what "blocked" means in all of
+# them. A reader who is not told will assume the stronger reading.
+_enforcement = summary.get("enforcement", "detected")
+if _enforcement == "detected":
+    st.warning(
+        "**Detection, not prevention.** This adapter exposes no pre-execution "
+        "seam, so tool hooks ran after the agent's turn had already completed. "
+        "Every `blocked` below means the policy *would* have stopped the call "
+        "in a live integration — here the side effect already happened.",
+        icon="⚠️",
+    )
+elif _enforcement == "mixed":
     st.info(
-        "**No benign suite in these results.** The false-positive rate is the "
-        "number that decides whether anyone leaves this switched on in "
-        "production, and it cannot be inferred from attack results. Add benign "
-        "cases with `success_check: {type: must_allow}`.",
+        f"**Mixed enforcement.** {summary.get('prevented_attacks', 0)} of "
+        f"{summary.get('total', 0)} attacks were intercepted before the tool "
+        "ran; the rest were evaluated after the fact.",
         icon="ℹ️",
     )
 

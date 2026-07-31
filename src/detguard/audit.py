@@ -113,22 +113,3 @@ def from_policy(policy, override_path: str | None = None) -> AuditLog | None:
     if not enabled or not path:
         return None
     return AuditLog(path=path, enabled=True)
-
-
-def read(path: str | Path) -> list[dict]:
-    """Read a log back. For the dashboard and for evidence export."""
-    p = Path(path)
-    if not p.is_file():
-        return []
-    entries = []
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entries.append(json.loads(line))
-        except ValueError:
-            # A corrupt line is reported by its absence being visible, not by
-            # discarding the whole file.
-            continue
-    return entries

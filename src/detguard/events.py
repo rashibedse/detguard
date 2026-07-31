@@ -24,14 +24,13 @@ SEVERITY_RANK = {name: i for i, name in enumerate(SEVERITIES)}
 
 
 class Unreadable:
-    """Type of the :data:`UNREADABLE` sentinel. Not for instantiation."""
+    """Type of the :data:`UNREADABLE` sentinel.
 
-    _instance: "Unreadable | None" = None
-
-    def __new__(cls) -> "Unreadable":
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
+    Recognised by type, not by identity — every consumer tests ``isinstance``,
+    so a second instance is just as unreadable as the canonical one. There is
+    deliberately no singleton machinery here: it would imply an identity
+    contract nothing actually relies on.
+    """
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return "UNREADABLE"
@@ -121,13 +120,6 @@ class AgentRun:
     final_output: str = ""
     metadata: dict = field(default_factory=dict)
 
-    def names(self) -> list[str]:
-        return [c.name for c in self.tool_calls]
-
-    def calls_to(self, tools) -> list:
-        wanted = set(tools or [])
-        return [c for c in self.tool_calls if c.name in wanted]
-
     def to_dict(self) -> dict:
         return {
             "tool_calls": [c.to_dict() for c in self.tool_calls],
@@ -168,6 +160,18 @@ class Verdict:
     must be able to tell them apart — conflating them was a real scoring bug in
     the predecessor project. Both stop unattended execution; only one of them
     means "a human may still say yes".
+
+    It describes **the rule that actually won blocker selection**, not "some
+    HITL rule somewhere in this hook also fired". Those are different facts: a
+    critical hard block firing alongside a low-severity HITL rule is a block,
+    and reporting it as "awaiting a human" understates the enforcement that
+    happened. ``hitl_also_fired`` keeps the weaker fact available for the
+    decision trace without letting it overwrite the outcome.
+
+    ``redacted`` says a ``redact`` action fired *and changed the text*. The
+    caller must write :attr:`text` back into whatever the consumer reads —
+    reporting a redaction and then forwarding the original is how a masked
+    secret reaches the user with a green row next to it.
     """
 
     allow: bool
@@ -177,6 +181,8 @@ class Verdict:
     blocked_by: str = ""
     severity: str = ""
     requires_approval: bool = False
+    hitl_also_fired: bool = False
+    redacted: bool = False
 
     @property
     def triggered(self) -> list:
@@ -191,4 +197,6 @@ class Verdict:
             "blocked_by": self.blocked_by,
             "severity": self.severity,
             "requires_approval": self.requires_approval,
+            "hitl_also_fired": self.hitl_also_fired,
+            "redacted": self.redacted,
         }

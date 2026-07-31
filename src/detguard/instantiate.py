@@ -803,17 +803,43 @@ def _dump(data: dict) -> str:
     )
 
 
-def write_corpus(result: InstantiationResult, out_dir: str | Path) -> list[Path]:
+def write_corpus(
+    result: InstantiationResult, out_dir: str | Path, force: bool = False
+) -> list[Path]:
     """Write the corpus to disk. Byte-identical across runs by construction —
-    nothing here records a time, a path, or an iteration order."""
+    nothing here records a time, a path, or an iteration order.
+
+    A concrete instance that no longer matches what this build would produce is
+    **kept, not overwritten**, unless ``force``. Instances are the artifact
+    clients tune: a generated attack often names a destination but no amount and
+    no source account, so no agent could comply and the unguarded baseline reads
+    as a defence. Fixing that by hand is the expected workflow, and a rebuild
+    that silently discarded the fix would send the corpus back to measuring
+    nothing — with a green report, because an attack nobody can comply with
+    never breaches.
+    """
     d = Path(out_dir)
     d.mkdir(parents=True, exist_ok=True)
 
     written: list[Path] = []
+    preserved: list[str] = []
     for attack in result.attacks:
         path = d / f"{attack.id}.yaml"
-        path.write_text(_dump(attack.to_dict()), encoding="utf-8")
+        rendered = _dump(attack.to_dict())
+        if not force and path.is_file():
+            current = path.read_text(encoding="utf-8")
+            if current != rendered and _is_hand_tuned(current, attack.id):
+                preserved.append(path.name)
+                written.append(path)
+                continue
+        path.write_text(rendered, encoding="utf-8")
         written.append(path)
+
+    if preserved:
+        result.warnings.append(
+            f"kept {len(preserved)} hand-edited instance(s) unchanged: "
+            f"{', '.join(sorted(preserved))} — pass --force to regenerate them"
+        )
 
     # Prune attacks this build did not produce. Without this, a template that
     # stops instantiating — roles removed, a mutation newly a no-op — leaves its
@@ -849,6 +875,21 @@ def write_corpus(result: InstantiationResult, out_dir: str | Path) -> list[Path]
     return written
 
 
+def _is_hand_tuned(current: str, attack_id: str) -> bool:
+    """Does this file look like a real instance someone edited?
+
+    Conservative on purpose. Anything that does not parse, or that is not
+    recognisably the same attack, is treated as *not* hand-tuned and gets
+    overwritten — the alternative is a corrupt file surviving forever because
+    nothing dares touch it.
+    """
+    try:
+        existing = yaml.safe_load(current)
+    except (yaml.YAMLError, OSError):
+        return False
+    return isinstance(existing, dict) and existing.get("id") == attack_id
+
+
 def load_corpus(directory: str | Path) -> list[dict]:
     """Read concrete attacks back off disk, sorted by id. The runner's input."""
     d = Path(directory)
@@ -879,6 +920,7 @@ def build(
     out_dir: str | Path = "corpus/attacks",
     template_dir: str | Path | None = None,
     exclude: Iterable[str] = (),
+    force: bool = False,
 ) -> InstantiationResult:
     """Load everything, instantiate, write. What ``detguard corpus build`` calls."""
     from .manifest import load_pair
@@ -890,5 +932,5 @@ def build(
     for template_id in excluded:
         result.skipped.append({"id": template_id, "reason": "excluded via --exclude"})
     result.skipped.sort(key=lambda s: s["id"])
-    write_corpus(result, out_dir)
+    write_corpus(result, out_dir, force=force)
     return result

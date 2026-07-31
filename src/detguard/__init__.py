@@ -16,7 +16,7 @@ Enforcement is 100% deterministic in v1. No LLM sits in the enforcement path.
     >>> verdict.allow, verdict.requires_approval
 """
 
-from . import engine, policy, registry, roles
+from . import engine, policy, registry, roles, guarded
 from .events import (
     HOOKS,
     SEVERITIES,
@@ -24,6 +24,15 @@ from .events import (
     GuardContext,
     ToolCall,
     Verdict,
+)
+from .guarded import (
+    ApprovalRequired,
+    Blocked,
+    GuardrailStop,
+    TurnResult,
+    guard,
+    set_turn,
+    turn,
 )
 from .policy import PolicyError, PolicySet, Rule
 from .roles import GATED_BY_DEFAULT, ROLES
@@ -34,9 +43,18 @@ __all__ = [
     "__version__",
     # modules
     "engine",
+    "guarded",
     "policy",
     "registry",
     "roles",
+    #delivery
+    "guard",
+    "turn",
+    "set_turn",
+    "GuardrailStop",
+    "Blocked",
+    "ApprovalRequired",
+    "TurnResult"
     # event model
     "HOOKS",
     "SEVERITIES",

@@ -75,8 +75,98 @@ def normalize(text: str) -> str:
 
 
 def _norm_ws(text: str) -> str:
-    """Normalise whitespace too — defeats ``whitespace_pad``."""
+    """Collapse runs of whitespace to a single space.
+
+    This alone does **not** defeat ``whitespace_pad``, which inserts separators
+    *inside* words: collapsing turns ``"ins\\ttructions"`` into
+    ``"ins tructions"``, still two tokens against a pattern expecting one. Use
+    :func:`_haystacks` for matching; this stays as the single-string form used
+    for reasons and excerpts.
+    """
     return re.sub(r"\s+", " ", normalize(text).replace(" ", " ")).strip()
+
+
+def _despace(text: str) -> str:
+    """Every whitespace character removed, not merely collapsed.
+
+    Paired with :func:`_whitespace_optional`. Deleting only *intra-word* runs
+    is the obvious idea and it does not work: whitespace between two ordinary
+    words sits between two word characters too, so ``"all previous"`` collapses
+    to ``"allprevious"`` and a pattern spelling the words separately stops
+    matching. Nothing lexical can tell a separator inside a token from one
+    between tokens, so this stops trying — it removes all of it and lets the
+    pattern side absorb the difference.
+    """
+    return re.sub(r"\s+", "", text)
+
+
+def _whitespace_optional(pattern: str) -> str:
+    """Rewrite a pattern so its whitespace can match nothing at all.
+
+    Only meaningful against a :func:`_despace` d haystack, where no whitespace
+    survives for ``\\s+`` or a literal space to match. ``\\s+`` becomes
+    ``\\s*``, as does a bare literal space.
+
+    Character classes are stepped over deliberately: turning the space in
+    ``[ ,]`` into ``\\s*`` would put a literal ``*`` in the class and silently
+    widen what the rule matches. A scanner that quietly changes meaning when
+    it rewrites is worse than one that misses.
+    """
+    out: list[str] = []
+    i = 0
+    in_class = False
+    while i < len(pattern):
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            if not in_class and pattern[i + 1] == "s":
+                out.append(r"\s*")
+                i += 3 if i + 2 < len(pattern) and pattern[i + 2] in "+*" else 2
+                continue
+            out.append(pattern[i : i + 2])
+            i += 2
+            continue
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        if char == " " and not in_class:
+            out.append(r"\s*")
+            i += 1
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _haystacks(text: str) -> list[str]:
+    """The forms a pattern is matched against, most faithful first.
+
+    The first is the honest normalisation. The second exists solely because
+    ``whitespace_pad`` inserts separators *inside* tokens, which the first
+    cannot see past. A rule fires if either matches — an attacker choosing
+    where to put the padding should not also get to choose which form the
+    scanner is blind to.
+    """
+    base = _norm_ws(text)
+    if not base:
+        return []
+    despaced = _despace(base)
+    return [base] if despaced == base else [base, despaced]
+
+
+def _search(pattern: str, haystacks: list[str]):
+    """Match a pattern across every haystack form, first hit wins.
+
+    The despaced form is matched with a whitespace-optional pattern, because
+    matching the original pattern against text with no whitespace in it would
+    fail for exactly the inputs this second form exists to catch.
+    """
+    for index, haystack in enumerate(haystacks):
+        candidate = pattern if index == 0 else _whitespace_optional(pattern)
+        match = re.search(candidate, haystack, re.IGNORECASE)
+        if match:
+            return match
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -148,11 +238,11 @@ def content_scan(ctx: GuardContext, params: dict) -> tuple[bool, str]:
     if applies_to == "user" and ctx.is_retrieved:
         return False, "content_scan: skipped (applies_to=user, is_retrieved=True)"
 
-    haystack = _norm_ws(ctx.text or "")
-    if not haystack:
+    haystacks = _haystacks(ctx.text or "")
+    if not haystacks:
         return False, "content_scan: no text to scan"
     for pattern in patterns:
-        match = re.search(pattern, haystack, re.IGNORECASE)
+        match = _search(pattern, haystacks)
         if match:
             excerpt = match.group(0)[:80]
             return True, f"content_scan[{name}]: matched {pattern!r} on {excerpt!r}"
@@ -162,13 +252,17 @@ def content_scan(ctx: GuardContext, params: dict) -> tuple[bool, str]:
 def pii_detect(ctx: GuardContext, params: dict) -> tuple[bool, str]:
     """Detect sensitive values. Detect only — never mutates."""
     name, patterns = _patterns(ctx, params)
-    haystack = _norm_ws(_result_text(ctx))
-    if not haystack:
+    haystacks = _haystacks(_result_text(ctx))
+    if not haystacks:
         return False, "pii_detect: no text to scan"
     hits: list[str] = []
     for pattern in patterns:
-        for match in re.finditer(pattern, haystack, re.IGNORECASE):
-            hits.append(match.group(0))
+        for index, haystack in enumerate(haystacks):
+            candidate = pattern if index == 0 else _whitespace_optional(pattern)
+            found = [m.group(0) for m in re.finditer(candidate, haystack, re.IGNORECASE)]
+            if found:
+                hits.extend(found)
+                break
     if hits:
         return True, f"pii_detect[{name}]: {len(hits)} match(es), first={hits[0][:40]!r}"
     return False, f"pii_detect[{name}]: no match over {len(patterns)} pattern(s)"
@@ -188,7 +282,11 @@ def pii_redact(ctx: GuardContext, params: dict) -> tuple[bool, str]:
     if applies_to == "retrieved" and not ctx.is_retrieved:
         return False, "pii_redact: skipped (applies_to=retrieved, is_retrieved=False)"
 
-    source = _result_text(ctx)
+    # Compose, don't clobber. Each redact rule on a hook must start from what
+    # the previous one produced: recomputing from ctx.text meant a second rule
+    # silently reinstated everything the first had masked, and the surviving
+    # secret was reported as redacted because both rules said "masked N".
+    source = ctx.redacted_text if ctx.redacted_text is not None else _result_text(ctx)
     if not source:
         return False, "pii_redact: no text to redact"
 
@@ -368,23 +466,36 @@ def external_destination(ctx: GuardContext, params: dict) -> tuple[bool, str]:
     An absent or empty allowlist means *nothing* is pre-approved, so any
     external destination fires. That is the safe default: an allowlist someone
     forgot to fill in must not read as "everywhere is fine".
+
+    An absent ``arg`` gets the same treatment. Naming no argument used to make
+    the rule read a value that could never exist, so it passed every call —
+    the exact fail-*open* the paragraph above promises it is not. With no
+    ``arg`` named, every argument on the call is examined instead.
     """
     tool = str(params.get("tool", ""))
     arg = str(params.get("arg", ""))
     allowlist = {str(a).strip().lower() for a in (params.get("allowlist") or [])}
 
-    for call in _calls_for_tool(ctx, tool):
-        raw = _norm_ws(_stringify(_arg(call, arg)))
-        if not raw:
-            continue
-        value = raw.lower()
+    def _allowed(value: str) -> bool:
         if value in allowlist:
-            continue
+            return True
         # Substring form so an allowlisted domain covers addresses on it.
-        if any(entry and entry in value for entry in allowlist):
-            continue
-        return True, f"external_destination: {call.name}.{arg}={raw[:60]!r} not allowlisted"
-    return False, f"external_destination: {tool or 'any'}.{arg} allowlisted or absent"
+        return any(entry and entry in value for entry in allowlist)
+
+    for call in _calls_for_tool(ctx, tool):
+        if arg:
+            candidates = [(arg, _arg(call, arg))]
+        else:
+            candidates = list((getattr(call, "args", None) or {}).items())
+        for arg_name, raw_value in candidates:
+            raw = _norm_ws(_stringify(raw_value))
+            if not raw or _allowed(raw.lower()):
+                continue
+            return (
+                True,
+                f"external_destination: {call.name}.{arg_name}={raw[:60]!r} not allowlisted",
+            )
+    return False, f"external_destination: {tool or 'any'}.{arg or '*'} allowlisted or absent"
 
 
 #: Optional, caller-supplied judge. Signature ``fn(ctx, params) -> (bool, str)``.

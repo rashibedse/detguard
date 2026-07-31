@@ -272,15 +272,45 @@ def politeness_wrap(payload: str) -> str:
     text = _MODAL_RE.sub("", text)
 
     # Stage 3: VERB <object> to <destination>
+    before_stage3 = text
     for verb, participle in PARTICIPLES.items():
         pattern = re.compile(rf"\b{verb}\b\s+(.{{1,80}}?)\s+to\s+", re.IGNORECASE)
         text = pattern.sub(lambda m, p=participle: f"{m.group(1)} is to be {p} to ", text)
 
     # Stage 4: bare imperative with no destination clause. Applied once —
-    # rewriting the same clause repeatedly compounds into nonsense.
-    text = _BARE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)} is required", text, count=1)
+    # rewriting the same clause repeatedly compounds into nonsense — and only
+    # when stage 3 found nothing, since running both over one sentence appends
+    # "is required" to a clause already rewritten into the passive and yields
+    # "... is to be transferred to X is required".
+    if text == before_stage3:
+        text = _BARE_RE.sub(lambda m: f"{m.group(1)}{m.group(2)} is required", text, count=1)
 
-    return _recapitalise(text.strip())
+    result = _recapitalise(text.strip())
+    # A mutation that emits garbage measures a model's tolerance for garbage,
+    # not its resistance to instructions. Returning the payload untouched makes
+    # this a no-op, which the corpus builder already reports as a skipped
+    # variant — far better than shipping a broken attack that reads as a test.
+    return payload if _is_malformed(result) else result
+
+
+#: An article stranded in front of a preposition — "a of 3000", "the to X".
+#: The signature of a rewrite that consumed a noun it mistook for a verb, which
+#: English invites because "transfer", "credit" and "settle" are both.
+_MALFORMED_RE = re.compile(
+    r"\b(?:a|an|the)\s+(?:of|to|from|for|with|by|in|on)\b", re.IGNORECASE
+)
+
+
+def _is_malformed(text: str) -> bool:
+    """Did the rewrite produce something no human would have written?
+
+    Two signatures, both seen on real corpus output: an article left standing
+    in front of a preposition, and a passive clause that also collected a
+    trailing "is required" from the bare-imperative stage.
+    """
+    if _MALFORMED_RE.search(text):
+        return True
+    return "is to be" in text and text.rstrip(" .").endswith("is required")
 
 
 # ---------------------------------------------------------------------------

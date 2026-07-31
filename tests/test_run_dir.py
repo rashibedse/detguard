@@ -209,4 +209,8 @@ def test_report_markdown_is_always_written_now(project):
 
     cli.main(["report", "--results", "runs/r/results-on.json"])
 
-    assert (project / "runs" / "r" / "ci_report.md").read_text().startswith("## detguard")
+    # encoding is explicit because the report is written as UTF-8 and contains
+    # non-ASCII (the warning callouts). Without it this reads as cp1252 on
+    # Windows and raises, which is a bug in the reader, not in the report.
+    markdown = (project / "runs" / "r" / "ci_report.md").read_text(encoding="utf-8")
+    assert markdown.startswith("## detguard")

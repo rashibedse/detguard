@@ -23,6 +23,16 @@ is a design error here, not a convenience.
                          must verify real post-run state rather than trusting
                          the agent's own account of what it did.
 
+There is a fifth, optional method: :meth:`BaseAdapter.set_tool_guard`. It is
+not abstract because not every framework exposes a seam to hang it on, and an
+adapter that cannot intercept must still be usable. What it changes is large
+though — see :attr:`BaseAdapter.intercepts`. Without it, ``before_tool`` runs
+after ``invoke()`` has already returned, so a "block" describes a call that
+already executed: detection, not prevention. With it, the guard is consulted
+*before* the tool body runs and a denial actually stops the call. Results
+record which of the two happened, because the difference is the entire
+distance between a benchmark and a guardrail.
+
 ``invoke``'s second argument is a mapping describing the untrusted carrier and
 the content to place in it::
 
@@ -36,20 +46,46 @@ itself.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Callable
 
 # AgentRun is part of the canonical event model, not of the adapter layer —
 # core has to be able to reason about a turn without importing anything from
 # here. Re-exported so adapters can keep importing it from their own package.
 from ..events import UNREADABLE, AgentRun, ToolCall, Unreadable
 
-__all__ = ["AgentRun", "BaseAdapter", "UNREADABLE", "Unreadable"]
+#: ``fn(tool_name, args) -> (allow, reason)``, consulted before a tool body
+#: runs. Deliberately not a class: an adapter should be able to satisfy this
+#: with a closure, and a future out-of-process adapter with an RPC stub.
+ToolGuard = Callable[[str, dict], "tuple[bool, str]"]
+
+__all__ = ["AgentRun", "BaseAdapter", "ToolGuard", "UNREADABLE", "Unreadable"]
 
 
 class BaseAdapter(ABC):
-    """What every adapter must provide. Four methods, no more."""
+    """What every adapter must provide. Four methods, plus one optional seam."""
 
     name: str = "base"
+
+    #: True when :meth:`set_tool_guard` really prevents execution. Left False
+    #: here deliberately: an adapter that silently accepted a guard it could
+    #: not honour would report prevention it never performed, which is a worse
+    #: failure than admitting the limitation.
+    intercepts: bool = False
+
+    def set_tool_guard(self, guard: "ToolGuard | None") -> bool:
+        """Install a pre-execution gate. Returns whether it took effect.
+
+        ``guard(tool_name, args) -> (allow, reason)`` is consulted immediately
+        before a tool body runs. On ``allow=False`` the tool must not execute;
+        the adapter substitutes ``reason`` as the call's result so the agent
+        sees a refusal and can respond to it, exactly as a real integration
+        would.
+
+        The default is an honest no-op returning False. Callers check the
+        return value rather than assuming, so that "this framework has no seam"
+        degrades to post-hoc detection instead of pretending to enforce.
+        """
+        return False
 
     @abstractmethod
     def introspect(self) -> dict:

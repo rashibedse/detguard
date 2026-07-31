@@ -37,6 +37,13 @@ WARNING_CLASSES = (LAYER_DRIFT, NEW_CASE, MISSING_CASE)
 EXIT_OK = 0
 EXIT_REGRESSION = 1
 EXIT_CONFIG = 2
+#: "Could not certify" — the run did not observe enough to make a claim either
+#: way. Distinct from :data:`EXIT_REGRESSION` because the causes are different
+#: and so is the response: a regression means someone changed the policy or the
+#: agent, whereas an unmeasurable run usually means the provider was flaky and
+#: the right move is to re-run, not to hunt for a security change that never
+#: happened. Sharing one exit code between them trains people to ignore both.
+EXIT_UNMEASURED = 3
 
 
 class BaselineError(ValueError):

@@ -313,7 +313,8 @@ def evaluate(policy: PolicySet, ctx: GuardContext) -> Verdict:
     decisions: list[Decision] = []
 
     blocker: Rule | None = None
-    requires_approval = False
+    hitl_also_fired = False
+    redacted = False
     text = ctx.text or ""
 
     for rule in policy.rules_for(ctx.hook):
@@ -334,9 +335,10 @@ def evaluate(policy: PolicySet, ctx: GuardContext) -> Verdict:
 
         if rule.action == "redact" and ctx.redacted_text is not None:
             text = ctx.redacted_text
+            redacted = True
 
         if rule.action == "require_hitl":
-            requires_approval = True
+            hitl_also_fired = True
 
         if rule.action in BLOCKING_ACTIONS:
             if blocker is None or _outranks(rule, blocker):
@@ -349,10 +351,19 @@ def evaluate(policy: PolicySet, ctx: GuardContext) -> Verdict:
             decisions=decisions,
             text=text,
             requires_approval=False,
+            hitl_also_fired=hitl_also_fired,
+            redacted=redacted,
         )
 
     # require_hitl stops unattended execution just as a block does; the flag is
     # what tells the caller a human may still say yes.
+    #
+    # It is keyed to the *winning* rule, not to "any HITL rule fired somewhere
+    # in this hook". Those diverge whenever a hard block and a HITL pause
+    # trigger together: the OR form let a low-severity advisory rule relabel a
+    # critical block as "awaiting approval", which reads as a softer outcome
+    # than what enforcement actually did. `hitl_also_fired` preserves the
+    # weaker fact for the trace without deciding the verdict.
     return Verdict(
         allow=False,
         hook=ctx.hook,
@@ -360,7 +371,9 @@ def evaluate(policy: PolicySet, ctx: GuardContext) -> Verdict:
         text=text,
         blocked_by=blocker.id,
         severity=blocker.severity,
-        requires_approval=requires_approval,
+        requires_approval=blocker.action == "require_hitl",
+        hitl_also_fired=hitl_also_fired,
+        redacted=redacted,
     )
 
 

@@ -77,6 +77,27 @@ One attack still succeeds, and the report names the one-line policy change that
 closes it. That finding — a real gap in a real agent — is the deliverable. See
 [docs/quickstart.md](docs/quickstart.md) to reproduce it in five minutes.
 
+### `prevented` vs `detected` — read this before the defense rate
+
+Every run records an `enforcement` mode, and `blocked` means something
+different under each.
+
+**`prevented`** — the adapter exposes a pre-execution seam, so `before_tool` is
+consulted inside the agent loop immediately before each tool body runs. A block
+stops the call: the transfer does not happen. `OpenAIAgentsAdapter` does this
+via the SDK's own `tool_input_guardrails`.
+
+**`detected`** — the adapter has no such seam, so the tool hooks are evaluated
+after the agent's turn has already completed. The decision trace is accurate and
+the policy logic is identical, but the call has run and the state has already
+moved. A `blocked` row here means *"a live integration would have stopped
+this"*, which is a claim about the policy, not a record of prevention.
+
+Both are useful and only one is a guardrail. When you call the four hooks
+yourself, as in the snippet above, you are always in the first mode — the
+distinction exists because a corpus runner has to drive somebody else's agent
+loop, and not every framework lets it in.
+
 ## What you give us
 
 Not your codebase. Your **tool manifest** — the names and argument schemas of
@@ -107,6 +128,17 @@ These are not defaults. They are the reasons the rest is trustworthy.
   `enabled: false`, and fails open when unavailable.
 - **A tool is executed exactly once.** `ToolCall.result` is authoritative and is
   never recomputed.
+- **A rule that fires changes what the consumer sees.** A `redact` action masks
+  the text that actually continues downstream. Reporting a redaction and then
+  forwarding the original would make the whole decision trace fiction, so
+  results carry a `mitigated` outcome distinct from `blocked`.
+- **Weaker outcomes are never summed into stronger ones.** `defense_rate`
+  counts hard blocks only. A HITL pause means a human may still say yes, and it
+  is reported as `containment_rate`; a redaction is reported as `mitigated`.
+- **"Could not measure" is not "passed", and not "regressed" either.** An
+  unmeasurable run exits `3`, distinct from a real regression's `1`, so a flaky
+  provider cannot look like a security change. `--allow-unmeasured` downgrades
+  it to a warning.
 - **A success check never passes on an empty tool-call list.** An agent that did
   nothing did not fall for anything.
 - **A skipped template is reported, never dropped.** "Not applicable to this

@@ -25,6 +25,7 @@ Two things keep a derived policy honest:
 from __future__ import annotations
 
 import datetime as _dt
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -112,7 +113,7 @@ def derive_policy(
         default_path = Path(__file__).resolve().parent / "policies" / "default.yaml"
         base = yaml.safe_load(default_path.read_text(encoding="utf-8"))
 
-    policy = _deep_copy(base)
+    policy = deepcopy(base)
     hints = arg_hints or {}
     rules = {r.get("id"): r for r in policy.get("rules", []) if isinstance(r, dict)}
 
@@ -209,14 +210,6 @@ def policy_rule(policy: dict, rule_id: str) -> dict | None:
         if isinstance(rule, dict) and rule.get("id") == rule_id:
             return rule
     return None
-
-
-def _deep_copy(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {k: _deep_copy(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_deep_copy(v) for v in value]
-    return value
 
 
 # ---------------------------------------------------------------------------

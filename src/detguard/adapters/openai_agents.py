@@ -15,9 +15,10 @@ decision about that run is still made by deterministic conditions.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
-from .base import UNREADABLE, AgentRun, BaseAdapter
+from .base import UNREADABLE, AgentRun, BaseAdapter, ToolGuard
 
 _IMPORT_HINT = (
     "OpenAI Agents SDK support needs the optional extra: "
@@ -68,6 +69,8 @@ class OpenAIAgentsAdapter(BaseAdapter):
         self.principal = principal
         self.run_config = dict(run_config or {})
         self._runner = runner
+        self._tool_guard: ToolGuard | None = None
+        self._guard_denials: list[dict] = []
 
     # -- discovery ---------------------------------------------------------
 
@@ -117,6 +120,79 @@ class OpenAIAgentsAdapter(BaseAdapter):
             "state_paths": {},
         }
 
+    # -- interception ------------------------------------------------------
+
+    def set_tool_guard(self, guard: ToolGuard | None) -> bool:
+        """Attach the guard to every tool's ``tool_input_guardrails``.
+
+        The SDK runs those *before* the tool body, which is the property that
+        matters: a denial here means the transfer never happens, rather than
+        being noticed once the balance has already moved. ``reject_content``
+        feeds the refusal back to the model as the call's result, so the agent
+        can react to being stopped the way it would in a real deployment.
+
+        Returns False — leaving :attr:`intercepts` False — on any SDK that
+        lacks this API, so an older install degrades to post-hoc detection
+        instead of silently reporting prevention it cannot perform.
+        """
+        self._tool_guard = guard
+        tools = list(getattr(self.agent, "tools", None) or [])
+        if not tools:
+            return False
+
+        try:
+            from agents import ToolGuardrailFunctionOutput, ToolInputGuardrail
+        except ImportError:
+            return False
+
+        if guard is None:
+            for tool in tools:
+                if hasattr(tool, "tool_input_guardrails"):
+                    tool.tool_input_guardrails = [
+                        g
+                        for g in (tool.tool_input_guardrails or [])
+                        if getattr(g, "name", "") != _GUARD_NAME
+                    ]
+            self.intercepts = False
+            return False
+
+        def _screen(data: Any) -> Any:
+            ctx = getattr(data, "context", None)
+            name = str(getattr(ctx, "tool_name", "") or "")
+            args = _decode_args(getattr(ctx, "tool_arguments", None))
+            try:
+                allow, reason = guard(name, args)
+            except Exception as exc:  # a broken guard must not silently permit
+                return ToolGuardrailFunctionOutput.reject_content(
+                    message=f"blocked: guard raised {exc.__class__.__name__}",
+                )
+            if allow:
+                return ToolGuardrailFunctionOutput.allow()
+            self._guard_denials.append({"name": name, "args": args, "reason": reason})
+            return ToolGuardrailFunctionOutput.reject_content(message=reason or "blocked by policy")
+
+        attached = False
+        for tool in tools:
+            if not hasattr(tool, "tool_input_guardrails"):
+                continue
+            existing = [
+                g
+                for g in (tool.tool_input_guardrails or [])
+                if getattr(g, "name", "") != _GUARD_NAME
+            ]
+            tool.tool_input_guardrails = existing + [
+                ToolInputGuardrail(guardrail_function=_screen, name=_GUARD_NAME)
+            ]
+            attached = True
+
+        self.intercepts = attached
+        return attached
+
+    def take_denials(self) -> list[dict]:
+        """Drain the calls this turn's guard refused, and forget them."""
+        drained, self._guard_denials = list(self._guard_denials), []
+        return drained
+
     # -- contract ----------------------------------------------------------
 
     def reset(self) -> None:
@@ -153,6 +229,23 @@ class OpenAIAgentsAdapter(BaseAdapter):
 # ---------------------------------------------------------------------------
 # run-item translation
 # ---------------------------------------------------------------------------
+
+#: Names the guardrail this adapter installs, so re-attaching replaces its own
+#: previous one rather than stacking a fresh copy on every ``reset()``.
+_GUARD_NAME = "detguard_tool_guard"
+
+
+def _decode_args(raw: Any) -> dict:
+    """The SDK hands arguments over as a JSON string; conditions want a dict."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw:
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            return {"_raw": raw}
+        return parsed if isinstance(parsed, dict) else {"_raw": raw}
+    return {}
 
 
 def _params_from_schema(schema: Any) -> dict:

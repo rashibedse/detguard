@@ -51,7 +51,11 @@ HITL_TOOL = {
 
 def test_all_four_hooks_exist_and_are_canonical():
     assert HOOKS == ("before_input", "before_tool", "after_tool", "before_output")
-    assert set(engine.HOOK_FUNCTIONS) == set(HOOKS)
+    # Asserted against the module's actual callables rather than a lookup dict
+    # mirroring them. The dict was only ever read by this assertion, and a
+    # registry that exists to be checked by the test that checks it proves
+    # nothing about whether the hooks are really there.
+    assert all(callable(getattr(engine, name)) for name in HOOKS)
 
 
 def test_before_input_returns_a_verdict():

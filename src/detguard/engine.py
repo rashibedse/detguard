@@ -181,13 +181,3 @@ def before_output(
         metadata=dict(metadata or {}),
     )
     return policy_mod.evaluate(policy, ctx)
-
-
-#: Hook name → callable, for the runner and for anything that drives the hooks
-#: generically. Signatures differ by hook, so callers must dispatch knowingly.
-HOOK_FUNCTIONS = {
-    "before_input": before_input,
-    "before_tool": before_tool,
-    "after_tool": after_tool,
-    "before_output": before_output,
-}

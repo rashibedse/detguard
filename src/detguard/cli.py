@@ -129,6 +129,7 @@ def _cmd_corpus_build(args: argparse.Namespace) -> int:
             out_dir=args.out,
             template_dir=args.templates,
             exclude=args.exclude,
+            force=args.force,
         )
     except (ManifestError, ValueError) as exc:
         print(f"detguard: {exc}", file=sys.stderr)
@@ -170,6 +171,50 @@ def _cmd_baseline_snapshot(args: argparse.Namespace) -> int:
         return EXIT_CONFIG
     path = write(snapshot(results), args.out)
     print(f"wrote {path} ({len(results.get('results', []))} case(s))")
+    return EXIT_OK
+
+
+def _cmd_baseline_mark_gap(args: argparse.Namespace) -> int:
+    """Accept a breach deliberately, with the reason recorded beside it.
+
+    Without this the workflow `baseline.py` builds GAP_CLOSED around had no
+    entry point: the only way to set `known_gap` was hand-editing JSON, and a
+    flag set that way hard-fails CI the moment the gap closes, with no
+    supported way to clear it.
+    """
+    from .baseline import BaselineError, load, mark_known_gap, write
+
+    try:
+        recorded = load(args.baseline)
+        updated = mark_known_gap(recorded, args.id, args.reason)
+    except (OSError, ValueError, BaselineError) as exc:
+        print(f"detguard: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    path = write(updated, args.baseline)
+    print(f"{args.id} recorded as an accepted gap in {path}\n  reason: {args.reason}")
+    return EXIT_OK
+
+
+def _cmd_baseline_clear_gap(args: argparse.Namespace) -> int:
+    """Withdraw an accepted gap — the other half of the workflow."""
+    from .baseline import BaselineError, load, write
+
+    try:
+        recorded = load(args.baseline)
+        case = (recorded.get("cases") or {}).get(args.id)
+        if case is None:
+            raise BaselineError(f"{args.id} is not in this baseline")
+        if not case.pop("known_gap", None):
+            print(f"detguard: {args.id} was not marked as a gap", file=sys.stderr)
+            return EXIT_CONFIG
+        case.pop("gap_reason", None)
+    except (OSError, ValueError, BaselineError) as exc:
+        print(f"detguard: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    path = write(recorded, args.baseline)
+    print(f"{args.id} is no longer an accepted gap in {path}")
     return EXIT_OK
 
 
@@ -215,7 +260,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
     out = args.out or str(run_dir / "ci_report.json")
     markdown = args.markdown or str(run_dir / "ci_report.md")
 
-    report = build(results, baseline=recorded, unguarded=unguarded)
+    report = build(
+        results,
+        baseline=recorded,
+        unguarded=unguarded,
+        allow_unmeasured=args.allow_unmeasured,
+    )
     write(report, out)
     Path(markdown).parent.mkdir(parents=True, exist_ok=True)
     with open(markdown, "w", encoding="utf-8") as handle:
@@ -682,10 +732,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
     )
     print(
         f"  {s['total']} attacks · {s['succeeded']} breached · {s['blocked']} blocked"
-        f" · {s['requires_approval']} held for approval · {s['not_complied']} not complied"
+        f" · {s['requires_approval']} held for approval · {s.get('mitigated', 0)} mitigated"
+        f" · {s['not_complied']} not complied"
         f" · {s.get('inconclusive', 0)} inconclusive · coverage {s.get('coverage', 1.0):.1%}"
         f" · defense rate {s['defense_rate']:.1%}"
     )
+    # Whether those blocks stopped calls or merely observed them. Printed
+    # because it changes what the defense rate above actually means, and a
+    # reader who has to go digging in the JSON for it will assume the stronger
+    # reading.
+    enforcement = s.get("enforcement", "detected")
+    if enforcement != "prevented":
+        print(
+            f"  enforcement: {enforcement} — "
+            + (
+                "hooks fired after the agent had already run, so a block records "
+                "what a real integration would have prevented, not what this run did"
+                if enforcement == "detected"
+                else "some attacks were intercepted before execution and some were not"
+            )
+        )
     if s["succeeded"]:
         print("\n  breaches:")
         for r in results["results"]:
@@ -708,12 +774,18 @@ def _write_run_manifest(run_dir: Path, args: argparse.Namespace, results: dict, 
     import yaml
 
     s = results.get("summary", {})
+    # `--adapter` is only consulted when detguard builds the adapter itself.
+    # With `--agent module:factory` the factory decides, and recording the
+    # ignored flag put `adapter: generic` next to `adapter_name: openai_agents`
+    # in the same file — an artifact that contradicts itself is worse than one
+    # that stays quiet, so the ignored value is omitted rather than preserved.
+    adapter_flag = None if getattr(args, "agent", None) else args.adapter
     manifest = {
         "generated_at": results.get("generated_at", ""),
         "command": {
             "corpus": args.corpus,
             "policy": args.policy,
-            "adapter": args.adapter,
+            "adapter": adapter_flag,
             "guardrail": args.guardrail,
             "graph": getattr(args, "graph", None),
             "tools": getattr(args, "tools", None),
@@ -908,6 +980,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="leave a template out entirely (repeatable), e.g. --exclude TPL-04 "
         "for a known-bad template — reported under skipped, not silently dropped",
     )
+    p_corpus_build.add_argument(
+        "--force",
+        action="store_true",
+        help="regenerate instances that were edited by hand. Without this they "
+        "are kept and reported: a hand-tuned attack is usually the only one in "
+        "its family that an agent can actually comply with, and silently "
+        "reverting it turns a real test back into an unmeasurable one",
+    )
     p_corpus_build.set_defaults(_handler=_cmd_corpus_build)
     p_corpus.set_defaults(_handler=lambda args: _pending("corpus", 4))
 
@@ -1031,6 +1111,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_cmp.add_argument("--results", required=True, help="path to results.json")
     p_cmp.add_argument("--baseline", required=True, help="path to baseline.json")
     p_cmp.set_defaults(_handler=_cmd_baseline_compare)
+    p_gap = baseline_sub.add_parser(
+        "mark-gap",
+        help="accept a breach as a known gap, with a reason, so it stops failing the build",
+    )
+    p_gap.add_argument("--baseline", required=True, help="path to baseline.json")
+    p_gap.add_argument("--id", required=True, help="attack id to accept")
+    p_gap.add_argument(
+        "--reason",
+        required=True,
+        help="why this gap is accepted. Required: a baseline of bare known_gap "
+        "flags is a list of things everyone has stopped looking at",
+    )
+    p_gap.set_defaults(_handler=_cmd_baseline_mark_gap)
+    p_ungap = baseline_sub.add_parser(
+        "clear-gap", help="withdraw a previously accepted gap"
+    )
+    p_ungap.add_argument("--baseline", required=True, help="path to baseline.json")
+    p_ungap.add_argument("--id", required=True, help="attack id to un-accept")
+    p_ungap.set_defaults(_handler=_cmd_baseline_clear_gap)
     p_baseline.set_defaults(_handler=lambda args: _pending("baseline", 10))
 
     # detguard report ------------------------------------------------------
@@ -1040,6 +1139,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_report.add_argument("--results", required=True, help="path to results.json")
     p_report.add_argument("--baseline", default=None, help="optional baseline.json")
+    p_report.add_argument(
+        "--allow-unmeasured",
+        action="store_true",
+        help="do not fail when the run could not observe every attack (exit 3). "
+        "A real regression still fails with exit 1",
+    )
     p_report.add_argument(
         "--unguarded",
         default=None,
