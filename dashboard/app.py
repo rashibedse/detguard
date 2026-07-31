@@ -249,356 +249,332 @@ elif _enforcement == "mixed":
         icon="ℹ️",
     )
 
-st.markdown("---")
+tab_overview, tab_coverage, tab_detail, tab_export = st.tabs(
+    ["📊 Overview", "🧩 Coverage & layers", "🔍 Per-attack detail", "⬇ Export"]
+)
 
 
 # ---------------------------------------------------------------------------
-# 2 — guarded vs unguarded
+# Tab 1 — overview: guarded vs unguarded, trend
 # ---------------------------------------------------------------------------
 
-st.subheader("Guarded vs unguarded")
-st.caption("Same corpus, same agent, enforcement the only difference.")
+with tab_overview:
+    st.subheader("Guarded vs unguarded")
+    st.caption("Same corpus, same agent, enforcement the only difference.")
 
-if unguarded is None:
-    st.info(
-        "Only one run loaded. Run the corpus again with `--guardrail off` to see "
-        "the comparison — it is the single most persuasive chart here, because "
-        "it is the one that shows what the policy is actually buying you."
+    if unguarded is None:
+        st.info(
+            "Only one run loaded. Run the corpus again with `--guardrail off` to see "
+            "the comparison — it is the single most persuasive chart here, because "
+            "it is the one that shows what the policy is actually buying you."
+        )
+    else:
+        rows = []
+        for run in (unguarded, guarded):
+            f = to_frame(run)
+            f = f[f["family"].isin(family_filter) & f["severity"].isin(severity_filter)]
+            for family, group in f.groupby("family"):
+                rows.append(
+                    {
+                        "family": family,
+                        "mode": "guardrail off" if run.get("guardrail") == "off" else "guardrail on",
+                        "breaches": int(group["succeeded"].sum()),
+                        "total": len(group),
+                    }
+                )
+        comparison = pd.DataFrame(rows)
+        if not comparison.empty:
+            chart = (
+                alt.Chart(comparison)
+                .mark_bar()
+                .encode(
+                    x=alt.X("family:N", title=None, axis=alt.Axis(labelAngle=-30)),
+                    y=alt.Y("breaches:Q", title="attacks that succeeded"),
+                    color=alt.Color(
+                        "mode:N",
+                        title=None,
+                        scale=alt.Scale(
+                            domain=["guardrail off", "guardrail on"],
+                            range=["#c0392b", "#1f7a4d"],
+                        ),
+                    ),
+                    xOffset="mode:N",
+                    tooltip=["family", "mode", "breaches", "total"],
+                )
+                .properties(height=320)
+            )
+            st.altair_chart(chart, width="stretch")
+
+            off_total = int(comparison[comparison["mode"] == "guardrail off"]["breaches"].sum())
+            on_total = int(comparison[comparison["mode"] == "guardrail on"]["breaches"].sum())
+            st.markdown(
+                f"**{off_total} → {on_total}** attacks succeed once the policy is enforced."
+            )
+
+    st.markdown("---")
+    st.subheader("Trend")
+
+    history = (
+        all_frames[all_frames["guardrail"] == "on"]
+        .groupby(["run", "generated_at"], as_index=False)
+        .agg(breaches=("succeeded", "sum"), total=("succeeded", "size"))
     )
-else:
-    rows = []
-    for run in (unguarded, guarded):
-        f = to_frame(run)
-        f = f[f["family"].isin(family_filter) & f["severity"].isin(severity_filter)]
-        for family, group in f.groupby("family"):
-            rows.append(
+    if len(history) > 1:
+        history["defense_rate"] = 1 - (history["breaches"] / history["total"])
+        history = history.sort_values("generated_at")
+        chart = (
+            alt.Chart(history)
+            .mark_line(point=True, strokeWidth=3, color="#1f7a4d")
+            .encode(
+                x=alt.X("generated_at:T", title=None),
+                y=alt.Y("defense_rate:Q", title="defense rate", scale=alt.Scale(domain=[0, 1])),
+                tooltip=["run", "generated_at", "breaches", "total", "defense_rate"],
+            )
+            .properties(height=260)
+        )
+        st.altair_chart(chart, width="stretch")
+    else:
+        st.info("Load more than one guarded run to see defense rate over time.")
+
+
+# ---------------------------------------------------------------------------
+# Tab 2 — coverage & layers: layer attribution, heatmap, mutations, skipped
+# ---------------------------------------------------------------------------
+
+with tab_coverage:
+    st.subheader("Layer attribution")
+    st.caption("Which layer stopped what. A single layer carrying everything is a warning, not a result.")
+
+    attribution = []
+    for _, row in view.iterrows():
+        if row["outcome"] in ("blocked", "approval_required"):
+            attribution.append(
                 {
-                    "family": family,
-                    "mode": "guardrail off" if run.get("guardrail") == "off" else "guardrail on",
-                    "breaches": int(group["succeeded"].sum()),
-                    "total": len(group),
+                    "layer": layer_for(guarded, row["blocked_by"]),
+                    "rule": row["blocked_by"],
+                    "hook": row["blocked_at_hook"],
+                    "outcome": OUTCOME_LABELS.get(row["outcome"], row["outcome"]),
+                    "count": 1,
                 }
             )
-    comparison = pd.DataFrame(rows)
-    if not comparison.empty:
+
+    if attribution:
+        layers = pd.DataFrame(attribution).groupby(["layer", "hook", "outcome"], as_index=False).sum()
         chart = (
-            alt.Chart(comparison)
+            alt.Chart(layers)
             .mark_bar()
             .encode(
-                x=alt.X("family:N", title=None, axis=alt.Axis(labelAngle=-30)),
-                y=alt.Y("breaches:Q", title="attacks that succeeded"),
+                x=alt.X("count:Q", title="attacks stopped"),
+                y=alt.Y("layer:N", title=None, sort="-x"),
                 color=alt.Color(
-                    "mode:N",
+                    "hook:N",
+                    title="hook",
+                    scale=alt.Scale(scheme="tableau10"),
+                ),
+                tooltip=["layer", "hook", "outcome", "count"],
+            )
+            .properties(height=max(200, 42 * layers["layer"].nunique()))
+        )
+        st.altair_chart(chart, width="stretch")
+    else:
+        st.info("Nothing was stopped in this run.")
+
+    st.markdown("---")
+    st.subheader("Coverage: family × severity")
+    st.caption("Breaches per cell. Empty is good; a hot cell is where to spend the next hour.")
+
+    heat = (
+        view.assign(breach=view["succeeded"].astype(int))
+        .groupby(["family", "severity"], as_index=False)
+        .agg(breaches=("breach", "sum"), total=("breach", "size"))
+    )
+    if not heat.empty:
+        chart = (
+            alt.Chart(heat)
+            .mark_rect()
+            .encode(
+                x=alt.X("severity:N", sort=SEVERITY_ORDER, title=None),
+                y=alt.Y("family:N", title=None),
+                color=alt.Color(
+                    "breaches:Q",
+                    title="breaches",
+                    scale=alt.Scale(scheme="reds"),
+                ),
+                tooltip=["family", "severity", "breaches", "total"],
+            )
+            .properties(height=max(180, 44 * heat["family"].nunique()))
+        )
+        text = chart.mark_text(baseline="middle", fontWeight="bold").encode(
+            text=alt.Text("breaches:Q"),
+            color=alt.value("#111"),
+        )
+        st.altair_chart(chart + text, width="stretch")
+
+    st.markdown("---")
+    st.subheader("Mutation effectiveness")
+    st.caption(
+        "Which obfuscations survive the filter. A mutation that gets through where "
+        "its base variant did not names the exact normalisation step you are missing."
+    )
+
+    mutation_rows = []
+    for template_id, group in view.groupby("template_id"):
+        base = group[group["mutation"] == "base"]
+        base_breached = bool(base["succeeded"].any()) if len(base) else False
+        for _, row in group.iterrows():
+            if row["mutation"] == "base":
+                continue
+            mutation_rows.append(
+                {
+                    "template": template_id,
+                    "mutation": row["mutation"],
+                    "outcome": OUTCOME_LABELS.get(row["outcome"], row["outcome"]),
+                    "got_through": bool(row["succeeded"]),
+                    "new_gap": bool(row["succeeded"]) and not base_breached,
+                }
+            )
+
+    if mutation_rows:
+        mutations = pd.DataFrame(mutation_rows)
+        chart = (
+            alt.Chart(mutations)
+            .mark_rect(stroke="white", strokeWidth=1)
+            .encode(
+                x=alt.X("mutation:N", title=None, axis=alt.Axis(labelAngle=-30)),
+                y=alt.Y("template:N", title=None),
+                color=alt.Color(
+                    "outcome:N",
                     title=None,
                     scale=alt.Scale(
-                        domain=["guardrail off", "guardrail on"],
-                        range=["#c0392b", "#1f7a4d"],
+                        domain=[OUTCOME_LABELS[k] for k in OUTCOME_COLOURS],
+                        range=list(OUTCOME_COLOURS.values()),
                     ),
                 ),
-                xOffset="mode:N",
-                tooltip=["family", "mode", "breaches", "total"],
+                tooltip=["template", "mutation", "outcome", "got_through", "new_gap"],
             )
-            .properties(height=320)
+            .properties(height=max(200, 30 * mutations["template"].nunique()))
         )
         st.altair_chart(chart, width="stretch")
 
-        off_total = int(comparison[comparison["mode"] == "guardrail off"]["breaches"].sum())
-        on_total = int(comparison[comparison["mode"] == "guardrail on"]["breaches"].sum())
-        st.markdown(
-            f"**{off_total} → {on_total}** attacks succeed once the policy is enforced."
-        )
+        escapes = mutations[mutations["new_gap"]]
+        if len(escapes):
+            st.error(
+                "**Mutations that got through where the base payload did not:** "
+                + ", ".join(f"{r.template}/{r.mutation}" for r in escapes.itertuples()),
+                icon="⚠️",
+            )
+        else:
+            st.success("No mutation defeated a filter that caught its base payload.", icon="✅")
+    else:
+        st.info("No mutation variants in this corpus.")
 
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# 3 — layer attribution
-# ---------------------------------------------------------------------------
-
-st.subheader("Layer attribution")
-st.caption("Which layer stopped what. A single layer carrying everything is a warning, not a result.")
-
-attribution = []
-for _, row in view.iterrows():
-    if row["outcome"] in ("blocked", "approval_required"):
-        attribution.append(
-            {
-                "layer": layer_for(guarded, row["blocked_by"]),
-                "rule": row["blocked_by"],
-                "hook": row["blocked_at_hook"],
-                "outcome": OUTCOME_LABELS.get(row["outcome"], row["outcome"]),
-                "count": 1,
-            }
-        )
-
-if attribution:
-    layers = pd.DataFrame(attribution).groupby(["layer", "hook", "outcome"], as_index=False).sum()
-    chart = (
-        alt.Chart(layers)
-        .mark_bar()
-        .encode(
-            x=alt.X("count:Q", title="attacks stopped"),
-            y=alt.Y("layer:N", title=None, sort="-x"),
-            color=alt.Color(
-                "hook:N",
-                title="hook",
-                scale=alt.Scale(scheme="tableau10"),
-            ),
-            tooltip=["layer", "hook", "outcome", "count"],
-        )
-        .properties(height=max(200, 42 * layers["layer"].nunique()))
+    st.markdown("---")
+    st.subheader("Not applicable to this agent")
+    st.caption(
+        "Templates that could not bind to this manifest, and why. This is coverage "
+        "information, not a gap — but an unexplained absence would be."
     )
-    st.altair_chart(chart, width="stretch")
-else:
-    st.info("Nothing was stopped in this run.")
 
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# 4 — family × severity heatmap
-# ---------------------------------------------------------------------------
-
-st.subheader("Coverage: family × severity")
-st.caption("Breaches per cell. Empty is good; a hot cell is where to spend the next hour.")
-
-heat = (
-    view.assign(breach=view["succeeded"].astype(int))
-    .groupby(["family", "severity"], as_index=False)
-    .agg(breaches=("breach", "sum"), total=("breach", "size"))
-)
-if not heat.empty:
-    chart = (
-        alt.Chart(heat)
-        .mark_rect()
-        .encode(
-            x=alt.X("severity:N", sort=SEVERITY_ORDER, title=None),
-            y=alt.Y("family:N", title=None),
-            color=alt.Color(
-                "breaches:Q",
-                title="breaches",
-                scale=alt.Scale(scheme="reds"),
-            ),
-            tooltip=["family", "severity", "breaches", "total"],
-        )
-        .properties(height=max(180, 44 * heat["family"].nunique()))
-    )
-    text = chart.mark_text(baseline="middle", fontWeight="bold").encode(
-        text=alt.Text("breaches:Q"),
-        color=alt.value("#111"),
-    )
-    st.altair_chart(chart + text, width="stretch")
-
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# 5 — mutation effectiveness
-# ---------------------------------------------------------------------------
-
-st.subheader("Mutation effectiveness")
-st.caption(
-    "Which obfuscations survive the filter. A mutation that gets through where "
-    "its base variant did not names the exact normalisation step you are missing."
-)
-
-mutation_rows = []
-for template_id, group in view.groupby("template_id"):
-    base = group[group["mutation"] == "base"]
-    base_breached = bool(base["succeeded"].any()) if len(base) else False
-    for _, row in group.iterrows():
-        if row["mutation"] == "base":
-            continue
-        mutation_rows.append(
-            {
-                "template": template_id,
-                "mutation": row["mutation"],
-                "outcome": OUTCOME_LABELS.get(row["outcome"], row["outcome"]),
-                "got_through": bool(row["succeeded"]),
-                "new_gap": bool(row["succeeded"]) and not base_breached,
-            }
-        )
-
-if mutation_rows:
-    mutations = pd.DataFrame(mutation_rows)
-    chart = (
-        alt.Chart(mutations)
-        .mark_rect(stroke="white", strokeWidth=1)
-        .encode(
-            x=alt.X("mutation:N", title=None, axis=alt.Axis(labelAngle=-30)),
-            y=alt.Y("template:N", title=None),
-            color=alt.Color(
-                "outcome:N",
-                title=None,
-                scale=alt.Scale(
-                    domain=[OUTCOME_LABELS[k] for k in OUTCOME_COLOURS],
-                    range=list(OUTCOME_COLOURS.values()),
-                ),
-            ),
-            tooltip=["template", "mutation", "outcome", "got_through", "new_gap"],
-        )
-        .properties(height=max(200, 30 * mutations["template"].nunique()))
-    )
-    st.altair_chart(chart, width="stretch")
-
-    escapes = mutations[mutations["new_gap"]]
-    if len(escapes):
-        st.error(
-            "**Mutations that got through where the base payload did not:** "
-            + ", ".join(f"{r.template}/{r.mutation}" for r in escapes.itertuples()),
-            icon="⚠️",
+    skipped = guarded.get("skipped_templates") or []
+    if skipped:
+        st.dataframe(
+            pd.DataFrame(skipped).rename(columns={"id": "template", "reason": "why it was skipped"}),
+            width="stretch",
+            hide_index=True,
         )
     else:
-        st.success("No mutation defeated a filter that caught its base payload.", icon="✅")
-else:
-    st.info("No mutation variants in this corpus.")
-
-st.markdown("---")
+        st.success("Every shipped template bound to this agent's tool surface.", icon="✅")
 
 
 # ---------------------------------------------------------------------------
-# 6 — skipped templates
+# Tab 3 — per-attack detail
 # ---------------------------------------------------------------------------
 
-st.subheader("Not applicable to this agent")
-st.caption(
-    "Templates that could not bind to this manifest, and why. This is coverage "
-    "information, not a gap — but an unexplained absence would be."
-)
+with tab_detail:
+    by_id = {r.get("id"): r for r in guarded.get("results", [])}
+    # Inconclusive sorts second: after real breaches, ahead of everything that was
+    # actually observed, because it is the category that needs a decision from a human.
+    order = {"breach": 0, "inconclusive": 1, "approval_required": 2, "not_complied": 3, "blocked": 4}
+    visible = sorted(view["id"], key=lambda i: (order.get(by_id.get(i, {}).get("outcome", ""), 9), i))
 
-skipped = guarded.get("skipped_templates") or []
-if skipped:
-    st.dataframe(
-        pd.DataFrame(skipped).rename(columns={"id": "template", "reason": "why it was skipped"}),
-        width="stretch",
-        hide_index=True,
-    )
-else:
-    st.success("Every shipped template bound to this agent's tool surface.", icon="✅")
+    st.caption(f"{len(visible)} attack(s) matching the current filters, worst outcomes first.")
 
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# 7 — trend
-# ---------------------------------------------------------------------------
-
-st.subheader("Trend")
-
-history = (
-    all_frames[all_frames["guardrail"] == "on"]
-    .groupby(["run", "generated_at"], as_index=False)
-    .agg(breaches=("succeeded", "sum"), total=("succeeded", "size"))
-)
-if len(history) > 1:
-    history["defense_rate"] = 1 - (history["breaches"] / history["total"])
-    history = history.sort_values("generated_at")
-    chart = (
-        alt.Chart(history)
-        .mark_line(point=True, strokeWidth=3, color="#1f7a4d")
-        .encode(
-            x=alt.X("generated_at:T", title=None),
-            y=alt.Y("defense_rate:Q", title="defense rate", scale=alt.Scale(domain=[0, 1])),
-            tooltip=["run", "generated_at", "breaches", "total", "defense_rate"],
-        )
-        .properties(height=260)
-    )
-    st.altair_chart(chart, width="stretch")
-else:
-    st.info("Load more than one guarded run to see defense rate over time.")
-
-st.markdown("---")
-
-
-# ---------------------------------------------------------------------------
-# 8 — per-attack detail
-# ---------------------------------------------------------------------------
-
-st.subheader("Per-attack detail")
-
-by_id = {r.get("id"): r for r in guarded.get("results", [])}
-# Inconclusive sorts second: after real breaches, ahead of everything that was
-# actually observed, because it is the category that needs a decision from a human.
-order = {"breach": 0, "inconclusive": 1, "approval_required": 2, "not_complied": 3, "blocked": 4}
-visible = sorted(view["id"], key=lambda i: (order.get(by_id.get(i, {}).get("outcome", ""), 9), i))
-
-for attack_id in visible:
-    record = by_id.get(attack_id)
-    if not record:
-        continue
-    outcome = record.get("outcome", "")
-    badge = {
-        "breach": "🔴",
-        "approval_required": "🟠",
-        "blocked": "🟢",
-        "not_complied": "⚪",
-        "inconclusive": "🟣",
-    }.get(outcome, "•")
-    label = OUTCOME_LABELS.get(outcome, outcome)
-    with st.expander(
-        f"{badge}  {attack_id} — {record.get('family', '')} / {record.get('severity', '')} — {label}"
-    ):
-        left, right = st.columns([1, 1])
-        with left:
-            st.markdown("**Success check**")
-            check = record.get("success_check") or {}
-            st.json(
-                {
-                    "type": check.get("type"),
-                    "expected": check.get("expected", check.get("expected_from_state")),
-                    "actual": check.get("actual"),
-                    "passed": check.get("passed"),
-                    "reason": check.get("reason"),
-                    **(
-                        {"relaxed_from": check["relaxed_from"]}
-                        if check.get("relaxed_from")
-                        else {}
-                    ),
-                },
-                expanded=True,
-            )
-            st.markdown("**Tool calls**")
-            calls = record.get("tool_calls") or []
-            if calls:
-                st.dataframe(
-                    pd.DataFrame(
-                        [{"tool": c.get("name"), "args": json.dumps(c.get("args", {}))} for c in calls]
-                    ),
-                    width="stretch",
-                    hide_index=True,
+    for attack_id in visible:
+        record = by_id.get(attack_id)
+        if not record:
+            continue
+        outcome = record.get("outcome", "")
+        badge = {
+            "breach": "🔴",
+            "approval_required": "🟠",
+            "blocked": "🟢",
+            "not_complied": "⚪",
+            "inconclusive": "🟣",
+        }.get(outcome, "•")
+        label = OUTCOME_LABELS.get(outcome, outcome)
+        with st.expander(
+            f"{badge}  {attack_id} — {record.get('family', '')} / {record.get('severity', '')} — {label}"
+        ):
+            left, right = st.columns([1, 1])
+            with left:
+                st.markdown("**Success check**")
+                check = record.get("success_check") or {}
+                st.json(
+                    {
+                        "type": check.get("type"),
+                        "expected": check.get("expected", check.get("expected_from_state")),
+                        "actual": check.get("actual"),
+                        "passed": check.get("passed"),
+                        "reason": check.get("reason"),
+                        **(
+                            {"relaxed_from": check["relaxed_from"]}
+                            if check.get("relaxed_from")
+                            else {}
+                        ),
+                    },
+                    expanded=True,
                 )
-            else:
-                st.caption("No tool calls — the turn was stopped before the agent ran.")
-        with right:
-            st.markdown("**Decision trace**")
-            decisions = record.get("decisions") or []
-            if decisions:
-                st.dataframe(
-                    pd.DataFrame(decisions)[
-                        ["name", "triggered", "action", "severity", "layer", "reason"]
-                    ],
-                    width="stretch",
-                    hide_index=True,
-                    height=min(360, 40 + 35 * len(decisions)),
-                )
-            else:
-                st.caption("No decisions — guardrail was off for this run.")
-            if record.get("final_output"):
-                st.markdown("**Final output**")
-                st.code(record["final_output"][:1200], language=None)
-
-st.markdown("---")
+                st.markdown("**Tool calls**")
+                calls = record.get("tool_calls") or []
+                if calls:
+                    st.dataframe(
+                        pd.DataFrame(
+                            [{"tool": c.get("name"), "args": json.dumps(c.get("args", {}))} for c in calls]
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.caption("No tool calls — the turn was stopped before the agent ran.")
+            with right:
+                st.markdown("**Decision trace**")
+                decisions = record.get("decisions") or []
+                if decisions:
+                    st.dataframe(
+                        pd.DataFrame(decisions)[
+                            ["name", "triggered", "action", "severity", "layer", "reason"]
+                        ],
+                        width="stretch",
+                        hide_index=True,
+                        height=min(360, 40 + 35 * len(decisions)),
+                    )
+                else:
+                    st.caption("No decisions — guardrail was off for this run.")
+                if record.get("final_output"):
+                    st.markdown("**Final output**")
+                    st.code(record["final_output"][:1200], language=None)
 
 
 # ---------------------------------------------------------------------------
-# 9 — export
+# Tab 4 — export
 # ---------------------------------------------------------------------------
 
-st.subheader("Export")
-st.download_button(
-    "Download filtered results (CSV)",
-    data=view.to_csv(index=False).encode("utf-8"),
-    file_name="detguard-results.csv",
-    mime="text/csv",
-)
-st.caption(f"{len(view)} row(s) matching the current filters.")
+with tab_export:
+    st.subheader("Export")
+    st.download_button(
+        "Download filtered results (CSV)",
+        data=view.to_csv(index=False).encode("utf-8"),
+        file_name="detguard-results.csv",
+        mime="text/csv",
+    )
+    st.caption(f"{len(view)} row(s) matching the current filters.")
