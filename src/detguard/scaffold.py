@@ -153,6 +153,29 @@ def _run_step(name: str, cfg: RunConfig, *, guardrail: str, run_dir: str, extra:
     return f"      - name: {name}\n" + _run_step_body(cfg, guardrail=guardrail, run_dir=run_dir, extra=extra)
 
 
+#: A backslash cannot appear inside an f-string's ``{...}`` expression before
+#: Python 3.12 (PEP 701) — this repo supports 3.10+, so the line-continuation
+#: literal is built here, outside any f-string, rather than inline as an
+#: ``extra=`` argument at the call site.
+_PR_SUBSET_EXTRA = "            --pr-subset \\\n"
+
+
+def _pr_subset_run_step(cfg: RunConfig) -> str:
+    return _run_step(
+        "Run the PR subset", cfg, guardrail="on", run_dir="runs/pr", extra=_PR_SUBSET_EXTRA
+    )
+
+
+_NIGHTLY_EXTRA = (
+    "            --enable-layer llm_judge \\\n"
+    "            --audit-log audit.jsonl \\\n"
+)
+
+
+def _nightly_run_step_body(cfg: RunConfig) -> str:
+    return _run_step_body(cfg, guardrail="on", run_dir="runs/nightly", extra=_NIGHTLY_EXTRA)
+
+
 def generate_workflow(cfg: RunConfig, include_nightly: bool = True) -> str:
     """A filled-in copy of ``.github/workflows/client-gate-template.yml``.
 
@@ -197,7 +220,7 @@ def generate_workflow(cfg: RunConfig, include_nightly: bool = True) -> str:
         f"            --manifest {cfg.manifest} \\\n"
         f"            --roles {cfg.roles} \\\n"
         '            --out "$DETGUARD_CORPUS"\n\n'
-        f"{_run_step('Run the PR subset', cfg, guardrail='on', run_dir='runs/pr', extra='            --pr-subset \\\n')}\n"
+        f"{_pr_subset_run_step(cfg)}\n"
         "      - name: Compare against the baseline\n"
         "        run: |\n"
         "          detguard baseline compare \\\n"
@@ -238,7 +261,7 @@ def generate_workflow(cfg: RunConfig, include_nightly: bool = True) -> str:
         "      - name: Full corpus, guardrail on, llm_judge enabled\n"
         "        env:\n"
         "          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
-        f"{_run_step_body(cfg, guardrail='on', run_dir='runs/nightly', extra='            --enable-layer llm_judge \\\n            --audit-log audit.jsonl \\\n')}\n"
+        f"{_nightly_run_step_body(cfg)}\n"
         f"{_run_step('Same corpus, guardrail off', cfg, guardrail='off', run_dir='runs/nightly')}\n"
         "      - name: Report with the guarded/unguarded delta\n"
         "        run: |\n"

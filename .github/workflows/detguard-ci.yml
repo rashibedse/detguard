@@ -91,6 +91,36 @@ jobs:
             --guardrail on \
             --out results-on.json
 
+      # The PR-blocking gate in client-gate-template.yml runs --pr-subset,
+      # not the full corpus — if that filtering broke, nothing above this
+      # step would catch it. Exercised end to end here, not just the narrow
+      # unit test on filter_attacks.
+      - name: Run corpus — PR subset (what the blocking gate actually runs)
+        run: |
+          detguard run \
+            --corpus corpus/attacks \
+            --policy examples/banking_agent/policy.yaml \
+            --agent examples.banking_agent.agent:FixtureAgent \
+            --guardrail on \
+            --pr-subset \
+            --out results-pr-subset.json
+
+      - name: Assert the PR subset is a real, smaller, non-empty slice
+        run: |
+          python - <<'PY'
+          import json, sys
+          full = json.load(open("results-on.json"))
+          subset = json.load(open("results-pr-subset.json"))
+          full_total = full["summary"]["total"]
+          subset_total = subset["summary"]["total"]
+          print(f"full corpus {full_total} attack(s) → pr-subset {subset_total}")
+          if subset_total == 0:
+              sys.exit("--pr-subset selected nothing; the blocking gate would run empty")
+          if subset_total >= full_total:
+              sys.exit("--pr-subset did not filter anything; pr_subset flags or "
+                        "filter_attacks may be broken")
+          PY
+
       - name: Report
         run: |
           detguard report \
