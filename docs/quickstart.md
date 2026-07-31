@@ -106,18 +106,22 @@ config error — which is all a CI gate needs. Copy
 
 Three ways, fastest first.
 
-**`detguard scaffold`** reads your agent's source and writes the whole
-integration — adapter, manifest, roles, policy, CI workflow:
+**`detguard derive`** takes a hand-written `detguard_adapter.py`,
+`manifest.yaml` and `roles.yaml` and derives `policy.yaml` plus a CI workflow
+from them, mechanically:
 
 ```bash
-export DETGUARD_API_KEY=...
-detguard scaffold --source-dir . --entry agent:run_agent
+detguard derive --manifest config/manifest.yaml --roles config/roles.yaml \
+  --adapter-import myapp.detguard_adapter:build_adapter
 ```
 
 Use this when your agent is **not** on a framework detguard already adapts —
 a hand-rolled loop, raw OpenAI function calling, anything where you would
-otherwise write an adapter by hand. See [scaffold.md](scaffold.md) for what is
-generated versus derived, and why the output is a draft rather than an answer.
+otherwise write an adapter by hand. No model, no network call: the adapter,
+manifest and role classification are yours to write (see
+[integration.md](integration.md) for the contract and checklist); only
+`policy.yaml` is derived. See [scaffold.md](scaffold.md) for what is derived
+versus hand-written.
 
 **`streamlit run dashboard/setup.py`** walks through manifest, roles, policy,
 run commands and CI as forms that validate before they write, with tool lists

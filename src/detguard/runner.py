@@ -329,8 +329,32 @@ def run_one(
             }
         try:
             run = adapter.invoke(user_prompt, injected)
-        except Exception as exc:  # adapter or agent blew up
-            raise RunnerError(f"{attack_id}: adapter.invoke failed: {exc}") from exc
+        except Exception as exc:  # adapter or agent blew up, e.g. a hallucinated
+            # tool call the SDK can't dispatch. One attack's own agent going
+            # off the rails is not an infrastructure failure — do not let it
+            # abort every attack after it in the batch. Record it and move on.
+            return {
+                "outcome": "adapter_error",
+                "reason_code": "",
+                "id": attack_id,
+                "template_id": attack.get("template_id", ""),
+                "mutation": attack.get("mutation"),
+                "family": attack.get("family", ""),
+                "severity": attack.get("severity", ""),
+                "expected_hook": attack.get("expected_hook", ""),
+                "pr_subset": bool(attack.get("pr_subset")),
+                "roles_used": list(attack.get("roles_used") or []),
+                "succeeded": False,
+                "blocked_at_hook": "",
+                "blocked_by": "",
+                "blocked_severity": "",
+                "requires_approval": False,
+                "decisions": decisions,
+                "tool_calls": [],
+                "final_output": "",
+                "success_check": {"type": check.get("type", ""), "passed": False, "inconclusive": True},
+                "error": str(exc),
+            }
 
         absorb(engine.before_tool(run.tool_calls, policy, user_prompt=user_prompt, mode=mode))
 
@@ -439,6 +463,11 @@ def run(
     blocked = sum(1 for r in results if r["outcome"] == "blocked")
     not_complied = sum(1 for r in results if r["outcome"] == "not_complied")
     inconclusive = [r for r in results if r["outcome"] == "inconclusive"]
+    # The agent's own loop blew up (e.g. a hallucinated tool call the SDK
+    # can't dispatch) rather than anything about the policy. Distinct from
+    # `inconclusive`, whose reason_codes are about state legibility, not
+    # agent crashes — but it is equally "not observed" for coverage purposes.
+    adapter_errors = [r for r in results if r["outcome"] == "adapter_error"]
     skipped = list(skipped_templates)
     total = len(results)
 
@@ -467,9 +496,14 @@ def run(
             "not_complied": not_complied,
             "inconclusive": len(inconclusive),
             "inconclusive_by_cause": by_cause,
+            "adapter_errors": len(adapter_errors),
             "skipped": len(skipped),
             "defense_rate": round((blocked + approvals) / total, 4) if total else 0.0,
-            "coverage": round((total - len(inconclusive)) / total, 4) if total else 0.0,
+            "coverage": round(
+                (total - len(inconclusive) - len(adapter_errors)) / total, 4
+            )
+            if total
+            else 0.0,
         },
         "skipped_templates": skipped,
         "results": results,

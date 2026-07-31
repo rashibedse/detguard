@@ -1,16 +1,14 @@
-"""``detguard scaffold`` — generation, derivation, and the guarantees around them.
+"""``detguard derive`` — deriving policy.yaml from a hand-written manifest + roles.
 
-The model-backed half cannot be unit tested without a key, so these tests pin
-the parts that must hold regardless of what a model returns: the policy is
-*derived* by rule and never guessed; nothing is written unless it survives the
-real validators; and generated files reach disk with their review material
-intact.
+Nothing here calls a model. These tests pin the guarantees that matter: the
+policy is *derived* by rule from the role map, never guessed; nothing is
+written unless it survives the real validators; and the derived file carries
+provenance so a reviewer never mistakes it for something hand-edited.
 """
 
 from __future__ import annotations
 
 import pytest
-import yaml
 
 from detguard import authoring
 from detguard.policy import loads as load_policy
@@ -22,6 +20,34 @@ ROLES_MAP = {
     "send_money": ["move_value"],
     "send_email": ["external_send"],
 }
+
+MANIFEST_YAML = """\
+agent: demo
+framework: generic
+principal: the account holder
+tools:
+  - name: send_money
+    description: Move funds.
+    params:
+      amount: {type: number, required: true}
+untrusted_sources:
+  - name: ticket_body
+    kind: record
+    injection_point: body
+state_paths:
+  move_value: account.balance
+"""
+
+ROLES_YAML = """\
+roles:
+  # why: transfers funds out of the principal's account
+  send_money: [move_value]
+"""
+
+ARG_HINTS_YAML = """\
+send_money:
+  amount_arg: amount
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -126,133 +152,38 @@ def test_an_unbound_arg_is_reported():
 
 
 # ---------------------------------------------------------------------------
-# response parsing
-# ---------------------------------------------------------------------------
-
-
-RESPONSE = """\
-Here is what I generated.
-
---- BEGIN detguard_adapter.py ---
-```python
-from detguard.adapters.base import AgentRun, BaseAdapter
-
-
-class MyAdapter(BaseAdapter):
-    name = "demo"
-
-    def introspect(self):
-        return {}
-
-    def reset(self):
-        pass
-
-    def invoke(self, user_prompt, injected_context=None):
-        return AgentRun()
-
-    def get_state(self, path):
-        return None
-
-
-def build_adapter():
-    return MyAdapter()
-```
---- END detguard_adapter.py ---
-
---- BEGIN manifest.yaml ---
-agent: demo
-framework: generic
-principal: the account holder
-tools:
-  - name: send_money
-    description: Move funds.
-    params:
-      amount: {type: number, required: true}
-untrusted_sources:
-  - name: ticket_body
-    kind: record
-    injection_point: body
-state_paths:
-  move_value: account.balance
---- END manifest.yaml ---
-
---- BEGIN roles.yaml ---
-roles:
-  # why: transfers funds out of the principal's account
-  send_money: [move_value]
---- END roles.yaml ---
-
---- BEGIN ARG_HINTS ---
-send_money:
-  amount_arg: amount
---- END ARG_HINTS ---
-
-NOTES:
-- no reset function found in the source; reset() raises a TODO
-"""
-
-
-def test_parse_response_extracts_every_file():
-    files = authoring.parse_response(RESPONSE)
-    assert set(files) == {"detguard_adapter.py", "manifest.yaml", "roles.yaml", "ARG_HINTS"}
-
-
-def test_parse_response_strips_the_code_fence():
-    files = authoring.parse_response(RESPONSE)
-    assert files["detguard_adapter.py"].startswith("from detguard.adapters.base")
-    assert "```" not in files["detguard_adapter.py"]
-
-
-def test_parse_response_refuses_an_empty_result():
-    with pytest.raises(authoring.AuthoringError):
-        authoring.parse_response("I could not do that.")
-
-
-def test_extract_notes():
-    assert "no reset function" in authoring.extract_notes(RESPONSE)
-
-
-# ---------------------------------------------------------------------------
-# the validation gate
+# the validation gate — build_bundle reads hand-written manifest + roles text
 # ---------------------------------------------------------------------------
 
 
 def test_a_good_bundle_validates_and_derives_its_own_policy():
-    bundle = authoring.build_bundle(authoring.parse_response(RESPONSE), model="test-model")
+    bundle = authoring.build_bundle(MANIFEST_YAML, ROLES_YAML, ARG_HINTS_YAML)
     assert bundle.ok, bundle.problems
-    # The policy was derived from the generated roles, not generated alongside them.
+    # The policy was derived from roles.yaml, not written alongside it.
     assert authoring.policy_rule(bundle.policy, "human_in_loop")["params"]["tools"] == ["send_money"]
     assert authoring.policy_rule(bundle.policy, "amount_bound")["params"]["arg"] == "amount"
 
 
-def test_broken_adapter_syntax_is_a_problem_not_a_write():
-    files = authoring.parse_response(RESPONSE)
-    files["detguard_adapter.py"] = "def build_adapter(:\n    pass\n"
-    bundle = authoring.build_bundle(files)
-    assert not bundle.ok
-    assert any("does not parse" in p for p in bundle.problems)
-
-
 def test_roles_naming_a_tool_absent_from_the_manifest_is_caught():
-    files = authoring.parse_response(RESPONSE)
-    files["roles.yaml"] = "roles:\n  nonexistent_tool: [move_value]\n"
-    bundle = authoring.build_bundle(files)
+    bundle = authoring.build_bundle(MANIFEST_YAML, "roles:\n  nonexistent_tool: [move_value]\n")
     assert not bundle.ok
     assert any("roles.yaml" in p for p in bundle.problems)
 
 
 def test_an_invented_role_is_caught():
-    files = authoring.parse_response(RESPONSE)
-    files["roles.yaml"] = "roles:\n  send_money: [steals_money]\n"
-    bundle = authoring.build_bundle(files)
+    bundle = authoring.build_bundle(MANIFEST_YAML, "roles:\n  send_money: [steals_money]\n")
     assert not bundle.ok
 
 
 def test_a_manifest_with_no_tools_is_caught():
-    files = authoring.parse_response(RESPONSE)
-    files["manifest.yaml"] = "agent: demo\nframework: generic\ntools: []\n"
-    bundle = authoring.build_bundle(files)
+    bundle = authoring.build_bundle("agent: demo\nframework: generic\ntools: []\n", ROLES_YAML)
     assert not bundle.ok
+
+
+def test_arg_hints_are_optional():
+    bundle = authoring.build_bundle(MANIFEST_YAML, ROLES_YAML)
+    assert bundle.ok, bundle.problems
+    assert bundle.arg_hints == {}
 
 
 # ---------------------------------------------------------------------------
@@ -263,223 +194,146 @@ def test_a_manifest_with_no_tools_is_caught():
 def test_write_refuses_a_bundle_that_failed_validation(tmp_path):
     bundle = authoring.Bundle(problems=["something is wrong"])
     with pytest.raises(authoring.AuthoringError):
-        authoring.write_bundle(bundle, tmp_path / "config", tmp_path / "adapter.py")
+        authoring.write_policy(bundle, tmp_path / "config" / "policy.yaml")
     assert not (tmp_path / "config").exists()
 
 
 def test_write_refuses_to_clobber_without_overwrite(tmp_path):
-    bundle = authoring.build_bundle(authoring.parse_response(RESPONSE), model="test-model")
-    adapter = tmp_path / "detguard_adapter.py"
-    adapter.write_text("# mine\n", encoding="utf-8")
+    bundle = authoring.build_bundle(MANIFEST_YAML, ROLES_YAML, ARG_HINTS_YAML)
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text("# mine\n", encoding="utf-8")
     with pytest.raises(authoring.AuthoringError):
-        authoring.write_bundle(bundle, tmp_path / "config", adapter)
-    assert adapter.read_text(encoding="utf-8") == "# mine\n"
+        authoring.write_policy(bundle, policy_path)
+    assert policy_path.read_text(encoding="utf-8") == "# mine\n"
 
 
-def test_written_roles_keep_their_reasoning_comments(tmp_path):
-    """The prompt asks for a `# why:` line per role so a reviewer checks the
-    classification instead of trusting it. Round-tripping through safe_dump
-    would strip every one of them — deleting the review material on the way to
-    disk."""
-    bundle = authoring.build_bundle(authoring.parse_response(RESPONSE), model="test-model")
-    authoring.write_bundle(bundle, tmp_path / "config", tmp_path / "detguard_adapter.py")
-    written = (tmp_path / "config" / "roles.yaml").read_text(encoding="utf-8")
-    assert "# why: transfers funds out of the principal's account" in written
+def test_written_policy_carries_provenance(tmp_path):
+    bundle = authoring.build_bundle(MANIFEST_YAML, ROLES_YAML, ARG_HINTS_YAML)
+    path = authoring.write_policy(bundle, tmp_path / "policy.yaml")
+    body = path.read_text(encoding="utf-8")
+    assert "DERIVED by `detguard derive`" in body
+    assert "detguard.authoring.unfilled" in body
 
 
-def test_every_written_file_carries_provenance(tmp_path):
-    bundle = authoring.build_bundle(authoring.parse_response(RESPONSE), model="test-model")
-    written = authoring.write_bundle(bundle, tmp_path / "config", tmp_path / "detguard_adapter.py")
-    for path in written:
-        body = path.read_text(encoding="utf-8")
-        assert "GENERATED by `detguard scaffold`" in body
-        assert "test-model" in body
-        assert "DRAFT" in body
-
-
-def test_written_config_still_loads_through_the_real_loaders(tmp_path):
-    from detguard.manifest import load_pair
+def test_written_policy_still_loads_through_the_real_loader(tmp_path):
     from detguard.policy import load as load_policy_file
 
-    bundle = authoring.build_bundle(authoring.parse_response(RESPONSE), model="test-model")
-    config = tmp_path / "config"
-    authoring.write_bundle(bundle, config, tmp_path / "detguard_adapter.py")
-
-    manifest, role_map = load_pair(config / "manifest.yaml", config / "roles.yaml")
-    assert manifest.tool_names == ["send_money"]
-    assert role_map.tools_for("move_value") == ["send_money"]
-    assert load_policy_file(config / "policy.yaml").rules
+    bundle = authoring.build_bundle(MANIFEST_YAML, ROLES_YAML, ARG_HINTS_YAML)
+    path = authoring.write_policy(bundle, tmp_path / "policy.yaml")
+    assert load_policy_file(path).rules
 
 
 # ---------------------------------------------------------------------------
-# source collection
-# ---------------------------------------------------------------------------
-
-
-def test_collect_sources_skips_dependency_directories(tmp_path):
-    (tmp_path / "agent.py").write_text("x = 1\n", encoding="utf-8")
-    vendored = tmp_path / ".venv" / "lib"
-    vendored.mkdir(parents=True)
-    (vendored / "noise.py").write_text("y = 2\n", encoding="utf-8")
-
-    found = authoring.collect_sources(tmp_path)
-    assert [s.path for s in found] == ["agent.py"]
-
-
-def test_collect_sources_records_truncation(tmp_path):
-    (tmp_path / "big.py").write_text("# pad\n" * 5000, encoding="utf-8")
-    found = authoring.collect_sources(tmp_path, max_bytes=200)
-    assert found[0].truncated
-    assert "truncated by detguard scaffold" in found[0].text
-
-
-def test_collect_sources_is_loud_about_finding_nothing(tmp_path):
-    with pytest.raises(authoring.AuthoringError):
-        authoring.collect_sources(tmp_path)
-
-
-# ---------------------------------------------------------------------------
-# provider selection
-# ---------------------------------------------------------------------------
-
-
-def test_provider_inferred_from_model_name():
-    assert authoring.infer_provider("claude-sonnet-5") == "anthropic"
-    assert authoring.infer_provider("gpt-4o") == "openai"
-    assert authoring.infer_provider("llama-3.1-8b-instant") == "openai"
-
-
-def test_a_missing_key_is_an_error_before_any_network_call(monkeypatch):
-    for name in ("DETGUARD_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
-        monkeypatch.delenv(name, raising=False)
-    with pytest.raises(authoring.AuthoringError, match="no API key"):
-        authoring.call_model("prompt", model="claude-sonnet-5", api_key="")
-
-
-def test_explicit_key_beats_the_environment(monkeypatch):
-    monkeypatch.setenv("DETGUARD_API_KEY", "from-env")
-    assert authoring.resolve_api_key("explicit") == "explicit"
-    assert authoring.resolve_api_key("") == "from-env"
-
-
-# ---------------------------------------------------------------------------
-# the prompt
-# ---------------------------------------------------------------------------
-
-
-def test_prompt_carries_the_closed_role_vocabulary_and_the_gated_set():
-    from detguard.roles import GATED_BY_DEFAULT, ROLES
-
-    prompt = authoring.build_prompt(
-        [authoring.SourceFile(path="agent.py", text="pass\n")], entry="agent:run"
-    )
-    for role in ROLES:
-        assert role in prompt
-    for role in GATED_BY_DEFAULT:
-        assert role in prompt
-
-
-def test_prompt_demands_the_known_factory_name():
-    """Everything downstream addresses the adapter as
-    `detguard_adapter:build_adapter`."""
-    prompt = authoring.build_prompt(
-        [authoring.SourceFile(path="agent.py", text="pass\n")], entry="agent:run"
-    )
-    assert "build_adapter()" in prompt
-
-
-def test_prompt_warns_against_double_execution():
-    prompt = authoring.build_prompt(
-        [authoring.SourceFile(path="agent.py", text="pass\n")], entry="agent:run"
-    )
-    assert "executed exactly once" in prompt
-    assert "doubles every real side effect" in prompt
-
-
-# ---------------------------------------------------------------------------
-# the command, end to end with the model stubbed
+# the command, end to end — no model involved
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    (tmp_path / "agent.py").write_text("def run_agent(msg):\n    return 'ok'\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(authoring, "call_model", lambda *a, **k: RESPONSE)
+    (tmp_path / "manifest.yaml").write_text(MANIFEST_YAML, encoding="utf-8")
+    (tmp_path / "roles.yaml").write_text(ROLES_YAML, encoding="utf-8")
+    (tmp_path / "arg_hints.yaml").write_text(ARG_HINTS_YAML, encoding="utf-8")
     return tmp_path
 
 
-def test_scaffold_writes_a_complete_working_integration(project):
+def test_derive_writes_policy_and_workflow(project):
     from detguard import cli
 
-    assert cli.main(["scaffold", "--source-dir", ".", "--entry", "agent:run_agent"]) == 0
+    assert cli.main(
+        [
+            "derive",
+            "--manifest", "manifest.yaml",
+            "--roles", "roles.yaml",
+            "--arg-hints", "arg_hints.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+        ]
+    ) == 0
 
-    for relative in (
-        "detguard_adapter.py",
-        "config/manifest.yaml",
-        "config/roles.yaml",
-        "config/policy.yaml",
-        ".github/workflows/detguard-gate.yml",
-    ):
-        assert (project / relative).is_file(), relative
+    assert (project / "config" / "policy.yaml").is_file()
+    assert (project / ".github/workflows/detguard-gate.yml").is_file()
+    # Nothing that was hand-written gets touched or copied.
+    assert not (project / "detguard_adapter.py").exists()
 
 
-def test_scaffolded_config_actually_builds_a_corpus(project):
-    """The end that matters. Files that validate but bind no attacks would be a
-    scaffolder that produces paperwork rather than an integration."""
+def test_derived_config_actually_builds_a_corpus(project):
+    """The end that matters. A policy that validates but binds no attacks would
+    be a derivation that produces paperwork rather than an integration."""
     from detguard import cli
     from detguard.instantiate import build
 
-    cli.main(["scaffold", "--source-dir", ".", "--entry", "agent:run_agent"])
+    cli.main(
+        [
+            "derive",
+            "--manifest", "manifest.yaml",
+            "--roles", "roles.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+        ]
+    )
     result = build(
-        manifest_path=str(project / "config" / "manifest.yaml"),
-        roles_path=str(project / "config" / "roles.yaml"),
+        manifest_path=str(project / "manifest.yaml"),
+        roles_path=str(project / "roles.yaml"),
         out_dir=str(project / "corpus" / "attacks"),
     )
     assert result.attacks
 
 
-def test_scaffolded_workflow_carries_no_windows_separators(project):
+def test_derived_workflow_carries_the_adapter_import(project):
     from detguard import cli
 
-    cli.main(["scaffold", "--source-dir", ".", "--entry", "agent:run_agent"])
+    cli.main(
+        [
+            "derive",
+            "--manifest", "manifest.yaml",
+            "--roles", "roles.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+        ]
+    )
     workflow = (project / ".github/workflows/detguard-gate.yml").read_text(encoding="utf-8")
-    # Trailing `\` is a shell line-continuation; anywhere else it is a path
-    # separator that breaks on ubuntu-latest.
-    assert not [ln for ln in workflow.splitlines() if "\\" in ln.rstrip().removesuffix("\\")]
-    assert "--agent detguard_adapter:build_adapter" in workflow
+    assert "myapp.detguard_adapter:build_adapter" in workflow
 
 
 def test_dry_run_writes_nothing(project):
     from detguard import cli
 
     assert cli.main(
-        ["scaffold", "--source-dir", ".", "--entry", "agent:run_agent", "--dry-run"]
+        [
+            "derive",
+            "--manifest", "manifest.yaml",
+            "--roles", "roles.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+            "--dry-run",
+        ]
     ) == 0
     assert not (project / "config").exists()
-    assert not (project / "detguard_adapter.py").exists()
 
 
-def test_print_prompt_needs_no_key_and_calls_no_model(project, monkeypatch):
-    from detguard import cli
-
-    def explode(*args, **kwargs):
-        raise AssertionError("--print-prompt must not reach the model")
-
-    monkeypatch.setattr(authoring, "call_model", explode)
-    assert cli.main(
-        ["scaffold", "--source-dir", ".", "--entry", "agent:run_agent", "--print-prompt"]
-    ) == 0
-
-
-def test_a_failed_generation_leaves_nothing_behind(project, monkeypatch):
+def test_a_failed_validation_leaves_nothing_behind(project):
     """Half a written integration is worse than none: the next command fails
     somewhere unrelated and the cause is three steps back."""
     from detguard import cli
 
-    broken = RESPONSE.replace("send_money: [move_value]", "send_money: [not_a_real_role]")
-    monkeypatch.setattr(authoring, "call_model", lambda *a, **k: broken)
+    (project / "roles.yaml").write_text("roles:\n  send_money: [not_a_real_role]\n", encoding="utf-8")
 
-    assert cli.main(["scaffold", "--source-dir", ".", "--entry", "agent:run_agent"]) == 2
+    assert cli.main(
+        [
+            "derive",
+            "--manifest", "manifest.yaml",
+            "--roles", "roles.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+        ]
+    ) == 2
     assert not (project / "config").exists()
-    assert not (project / "detguard_adapter.py").exists()
+
+
+def test_a_missing_manifest_is_a_config_error(project):
+    from detguard import cli
+
+    assert cli.main(
+        [
+            "derive",
+            "--manifest", "nope.yaml",
+            "--roles", "roles.yaml",
+            "--adapter-import", "myapp.detguard_adapter:build_adapter",
+        ]
+    ) == 2

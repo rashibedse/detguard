@@ -203,11 +203,21 @@ class Template:
     sha: str = ""
 
 
-def load_templates(directory: str | Path | None = None) -> list[Template]:
-    """Load every shipped template, sorted by id."""
+def load_templates(
+    directory: str | Path | None = None, exclude: Iterable[str] = ()
+) -> list[Template]:
+    """Load every shipped template, sorted by id.
+
+    ``exclude`` names template ids to leave out entirely — for a template with
+    a known bug, until it's fixed, rather than deleting or reordering it. The
+    caller is responsible for reporting the exclusion (see
+    ``build``/``skipped``): silently leaving a template out would read as
+    "not applicable" instead of "known-bad, temporarily off".
+    """
     d = Path(directory) if directory else TEMPLATE_DIR
     if not d.is_dir():
         raise InstantiationError(f"template directory not found: {d}")
+    excluded = {str(e) for e in exclude}
 
     templates: list[Template] = []
     for path in sorted(d.glob("TPL-*.yaml")):
@@ -218,6 +228,8 @@ def load_templates(directory: str | Path | None = None) -> list[Template]:
             raise InstantiationError(f"{path}: not valid YAML: {exc}") from exc
         if not isinstance(data, dict):
             raise InstantiationError(f"{path}: template must be a mapping")
+        if str(data.get("id")) in excluded:
+            continue
 
         unknown = set(data) - _TEMPLATE_KEYS
         if unknown:
@@ -866,12 +878,17 @@ def build(
     roles_path: str | Path,
     out_dir: str | Path = "corpus/attacks",
     template_dir: str | Path | None = None,
+    exclude: Iterable[str] = (),
 ) -> InstantiationResult:
     """Load everything, instantiate, write. What ``detguard corpus build`` calls."""
     from .manifest import load_pair
 
     manifest, role_map = load_pair(manifest_path, roles_path)
-    templates = load_templates(template_dir)
+    excluded = sorted({str(e) for e in exclude})
+    templates = load_templates(template_dir, exclude=excluded)
     result = instantiate(templates, manifest, role_map)
+    for template_id in excluded:
+        result.skipped.append({"id": template_id, "reason": "excluded via --exclude"})
+    result.skipped.sort(key=lambda s: s["id"])
     write_corpus(result, out_dir)
     return result

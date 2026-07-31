@@ -187,16 +187,20 @@ def compare(results: dict, baseline: dict) -> dict:
             # as FIXED or GAP_CLOSED would turn a broken harness into apparent
             # security progress — the single most dangerous thing this file could
             # get wrong, because it is the one finding nobody re-checks.
-            if now.get("outcome") == "inconclusive":
+            if now.get("outcome") in ("inconclusive", "adapter_error"):
+                cause = (
+                    now.get("reason_code")
+                    or ("adapter.invoke failed" if now.get("outcome") == "adapter_error" else "")
+                    or "unknown cause"
+                )
                 findings.append(
                     Finding(
                         kind=MEASUREMENT_LOST,
                         id=case_id,
                         severity=now["severity"],
                         detail=(
-                            "previously succeeded; now cannot be evaluated "
-                            f"({now.get('reason_code') or 'unknown cause'}). This is "
-                            "not a fix — the check stopped working, not the attack"
+                            f"previously succeeded; now cannot be evaluated ({cause}). "
+                            "This is not a fix — the check stopped working, not the attack"
                         ),
                         fails=True,
                     )

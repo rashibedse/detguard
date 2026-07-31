@@ -107,6 +107,115 @@ Nothing in this contract assumes in-process execution, so a future MCP proxy
 adapter can satisfy it by mapping a request to `before_tool` and a response to
 `after_tool`.
 
+### Hand-writing `detguard_adapter.py` (no framework)
+
+When `GenericAdapter` doesn't fit — your agent needs bespoke reset/state
+logic, or you want full control over dispatch — subclass `BaseAdapter`
+directly:
+
+```python
+from detguard.adapters.base import AgentRun, BaseAdapter
+
+class MyAdapter(BaseAdapter):
+    name = "..."
+    def introspect(self) -> dict: ...      # manifest as a dict, metadata only
+    def reset(self) -> None: ...           # fresh state before EVERY attack
+    def invoke(self, user_prompt: str, injected_context: dict | None = None) -> AgentRun: ...
+    def get_state(self, path: str): ...    # read real post-run state
+
+def build_adapter() -> MyAdapter:
+    return MyAdapter()
+```
+
+**The module must define a zero-argument factory named exactly
+`build_adapter()`.** Everything downstream — `detguard run --agent`, the CI
+workflow `detguard derive` generates — addresses the adapter as
+`module:build_adapter`, so a differently named factory means every command
+and workflow is wrong.
+
+Four requirements, in order of how badly they break things when missed:
+
+**(a) A tool is executed exactly once.** `invoke()` must run the agent's own
+loop once and *record* what it did. It must NOT collect a list of intended
+calls and then execute them itself — that doubles every real side effect
+(rows inserted twice, emails sent twice) and makes every number in the report
+fiction. Find where your source actually executes tools and record there.
+
+**(b) The trace must survive dispatch.** Look at how your loop maps a tool
+name to a function. If it builds a dict at import time, patching the module
+attribute will not work — the dict already holds the original reference, and
+you get an empty trace, which reports as "the agent never called anything"
+and reads as a perfect defense. Patch whatever the loop actually reads from,
+and restore it afterwards.
+
+**(c) `reset()` must genuinely reset.** If your seed/init function is
+idempotent ("only seed if empty"), it is NOT usable as a reset hook — state
+from attack 1 leaks into attack 2 and every result after the first is
+measured against contaminated state. Write a reset that truly wipes and
+reseeds.
+
+**(d) `get_state(path)` reads the real store.** Not the agent's account of
+itself. Use `self.read_path(mapping, path)` or query the backing store
+directly. Where no reader is possible, return the `UNREADABLE` sentinel from
+`detguard.adapters.base` — never `None`, which reads as "unchanged" and gets
+reported as a defense that never happened.
+
+Handle `injected_context`: when it carries `content`, place that untrusted
+text where this agent would really encounter it.
+
+### Hand-writing `roles.yaml`
+
+```yaml
+roles:
+  # why: transfers funds out of the principal's account
+  send_money: [move_value]
+```
+
+Closed vocabulary, nothing outside it — an unrecognized role is a hard
+load-time error, not a warning:
+
+```
+read_internal, read_untrusted, mutate_state, mutate_identity,
+move_value, change_credential, external_send, external_fetch, destructive
+```
+
+Gated by default (land in `human_in_loop` unless you deliberately tune down):
+`mutate_identity`, `move_value`, `change_credential`, `external_send`,
+`destructive`.
+
+**When uncertain, assign the more restrictive role.** A tool wrongly classed
+`read_internal` is never gated by anything and fails silently; a tool wrongly
+classed `external_send` causes a visible, fixable false positive. These are
+not symmetric errors.
+
+Put a `# why:` comment above each tool giving your reasoning in one line, so a
+reviewer checks the judgement instead of trusting it.
+
+For `ungrounded_destination` and `amount_bound` to bind automatically, name
+which argument carries a destination and which carries an amount in an
+`arg_hints.yaml`:
+
+```yaml
+send_money:
+  destination_arg: to
+  amount_arg: amount
+```
+
+### Deriving `policy.yaml`
+
+Once `manifest.yaml` and `roles.yaml` exist, everything past that point is
+mechanical — `derive_policy` fills the CLIENT-marked rules from the role map
+by rule, never by judgement:
+
+```bash
+detguard derive --manifest config/manifest.yaml --roles config/roles.yaml \
+  --arg-hints config/arg_hints.yaml \
+  --adapter-import myapp.detguard_adapter:build_adapter
+```
+
+No model, no network call. See `docs/scaffold.md` for the full command and
+what it does and does not fill in.
+
 ### Custom framework — `GenericAdapter`
 
 The universal fallback. It wraps a tool dict and a decide-function and works

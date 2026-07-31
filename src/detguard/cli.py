@@ -128,6 +128,7 @@ def _cmd_corpus_build(args: argparse.Namespace) -> int:
             roles_path=args.roles,
             out_dir=args.out,
             template_dir=args.templates,
+            exclude=args.exclude,
         )
     except (ManifestError, ValueError) as exc:
         print(f"detguard: {exc}", file=sys.stderr)
@@ -138,11 +139,11 @@ def _cmd_corpus_build(args: argparse.Namespace) -> int:
 
     print(f"wrote {len(result.attacks)} concrete attack(s) to {args.out}")
 
-    # Skipped templates are coverage information, not noise. They are printed
-    # every time, because "not applicable to this agent" is a claim the client
-    # should see rather than a row that quietly vanished.
+    # Skipped templates are coverage information, not noise — whether the skip
+    # is "not applicable to this agent" or an explicit --exclude, it is
+    # reported output, not a row that quietly vanished.
     if result.skipped:
-        print(f"\nskipped {len(result.skipped)} template(s) — not applicable to this agent:")
+        print(f"\nskipped {len(result.skipped)} template(s):")
         for entry in result.skipped:
             print(f"  {entry['id']}: {entry['reason']}")
     if result.skipped_mutations:
@@ -248,6 +249,29 @@ def _build_langgraph_adapter(args: argparse.Namespace):
     return LangGraphAdapter(**kwargs)
 
 
+def _build_openai_agents_adapter(args: argparse.Namespace):
+    """Construct an ``OpenAIAgentsAdapter`` from ``--agent-obj`` / ``--reset``.
+
+    Mirrors ``_build_langgraph_adapter``: the common case is an ``agents.Agent``
+    instance already sitting in your own module, and writing a one-line
+    factory just to wrap it in ``OpenAIAgentsAdapter`` is boilerplate the CLI
+    can do instead. Anyone who needs something the flags don't cover — a
+    custom ``state_reader`` builder, extra wiring — still writes a factory and
+    passes ``--agent``.
+    """
+    from .adapters.openai_agents import OpenAIAgentsAdapter
+
+    agent = _resolve_import(args.agent_obj, "--agent-obj")
+    reset_hook = _resolve_import(args.reset, "--reset") if args.reset else None
+
+    kwargs: dict = {"agent": agent, "reset_hook": reset_hook}
+    if getattr(args, "agent_name", None):
+        kwargs["agent_name"] = args.agent_name
+    if getattr(args, "state_reader", None):
+        kwargs["state_reader"] = _resolve_import(args.state_reader, "--state-reader")
+    return OpenAIAgentsAdapter(**kwargs)
+
+
 def _resolve_tools(spec: str) -> list:
     """Resolve ``--tools`` to a list, accepting a list/tuple or a name->tool dict.
 
@@ -278,10 +302,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
     """
     import yaml
 
-    if args.graph and args.agent:
+    agent_obj = getattr(args, "agent_obj", None)
+    if (args.graph or agent_obj) and args.agent:
+        built_flag = "--graph" if args.graph else "--agent-obj"
         print(
-            "detguard: pass either --graph (the CLI builds the adapter) or "
-            "--agent module:factory (you build it), not both",
+            f"detguard: pass either {built_flag} (the CLI builds the adapter) "
+            "or --agent module:factory (you build it), not both",
             file=sys.stderr,
         )
         return EXIT_CONFIG
@@ -291,10 +317,16 @@ def _cmd_init(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_CONFIG
+    if agent_obj and args.framework != "openai_agents":
+        print(
+            f"detguard: --agent-obj is openai_agents-specific; got --framework {args.framework}",
+            file=sys.stderr,
+        )
+        return EXIT_CONFIG
     for flag in ("reset", "tools", "state_reader"):
-        if getattr(args, flag, None) and not args.graph:
+        if getattr(args, flag, None) and not (args.graph or agent_obj):
             name = "--" + flag.replace("_", "-")
-            print(f"detguard: {name} only applies alongside --graph", file=sys.stderr)
+            print(f"detguard: {name} only applies alongside --graph or --agent-obj", file=sys.stderr)
             return EXIT_CONFIG
 
     if args.graph:
@@ -302,6 +334,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
             adapter = _build_langgraph_adapter(args)
         except Exception as exc:  # noqa: BLE001 - surface whatever the import raised
             print(f"detguard: could not build a LangGraphAdapter: {exc}", file=sys.stderr)
+            return EXIT_CONFIG
+        return _write_manifest(adapter, args)
+
+    if agent_obj:
+        try:
+            adapter = _build_openai_agents_adapter(args)
+        except Exception as exc:  # noqa: BLE001 - surface whatever the import raised
+            print(f"detguard: could not build an OpenAIAgentsAdapter: {exc}", file=sys.stderr)
             return EXIT_CONFIG
         return _write_manifest(adapter, args)
 
@@ -409,120 +449,73 @@ def _report_no_tools(args: argparse.Namespace) -> None:
         )
 
 
-def _cmd_scaffold(args: argparse.Namespace) -> int:
-    """Generate the adapter, manifest, roles, policy and CI workflow.
+def _cmd_derive(args: argparse.Namespace) -> int:
+    """Derive policy.yaml (and a CI workflow) from a hand-written manifest + roles.
 
-    The split matters and is visible in the output: the policy and the workflow
-    are *derived* from the role map by rule, and only the adapter and the role
-    classification come from a model. Enforcement still runs deterministic
-    conditions over a file a human reviewed and committed.
+    No model, no network call, no API key. ``detguard_adapter.py``,
+    ``manifest.yaml`` and ``roles.yaml`` are written by a human who has read
+    the agent's source — see docs/integration.md for the pattern. This command
+    validates the manifest and role map, derives the policy from the role map
+    by rule, and generates the CI workflow, all mechanically.
     """
     from . import authoring
     from .scaffold import AdapterConfig, RunConfig, generate_workflow
 
-    try:
-        sources = authoring.collect_sources(args.source_dir)
-    except authoring.AuthoringError as exc:
-        print(f"detguard: {exc}", file=sys.stderr)
-        return EXIT_CONFIG
+    manifest_path = Path(args.manifest)
+    roles_path = Path(args.roles)
+    for path, flag in ((manifest_path, "--manifest"), (roles_path, "--roles")):
+        if not path.is_file():
+            print(f"detguard: {flag} {path} not found", file=sys.stderr)
+            return EXIT_CONFIG
 
-    print(f"read {len(sources)} source file(s) from {args.source_dir}")
-    for source in sources:
-        print(f"  {source.path}{'  (truncated)' if source.truncated else ''}")
-
-    prompt = authoring.build_prompt(
-        sources, entry=args.entry, reset=args.reset or "", agent_name=args.agent_name or ""
-    )
-
-    if args.print_prompt:
-        print(prompt)
-        return EXIT_OK
-
-    api_key = authoring.resolve_api_key(args.api_key or "")
-    print(f"\ngenerating with {args.model} — this reads your source, it never runs it")
-    try:
-        raw = authoring.call_model(
-            prompt,
-            model=args.model,
-            api_key=api_key,
-            provider=args.provider or "",
-            base_url=args.base_url or "",
-        )
-    except authoring.AuthoringError as exc:
-        print(f"detguard: {exc}", file=sys.stderr)
-        return EXIT_CONFIG
-    except Exception as exc:  # noqa: BLE001 - surface whatever the SDK raised
-        print(f"detguard: model call failed: {exc}", file=sys.stderr)
-        return EXIT_CONFIG
-
-    try:
-        files = authoring.parse_response(raw)
-    except authoring.AuthoringError as exc:
-        print(f"detguard: {exc}", file=sys.stderr)
-        return EXIT_CONFIG
+    arg_hints_text = ""
+    if args.arg_hints:
+        arg_hints_path = Path(args.arg_hints)
+        if not arg_hints_path.is_file():
+            print(f"detguard: --arg-hints {arg_hints_path} not found", file=sys.stderr)
+            return EXIT_CONFIG
+        arg_hints_text = arg_hints_path.read_text(encoding="utf-8")
 
     bundle = authoring.build_bundle(
-        files, notes=authoring.extract_notes(raw), model=args.model
+        manifest_text=manifest_path.read_text(encoding="utf-8"),
+        roles_text=roles_path.read_text(encoding="utf-8"),
+        arg_hints_text=arg_hints_text,
     )
 
-    if bundle.notes:
-        print("\nthe model flagged:")
-        for line in bundle.notes.splitlines():
-            if line.strip():
-                print(f"  {line.rstrip()}")
-
     if not bundle.ok:
-        print("\ndetguard: generated files did not validate — nothing written:", file=sys.stderr)
+        print("detguard: manifest/roles did not validate — nothing written:", file=sys.stderr)
         for problem in bundle.problems:
             print(f"  {problem}", file=sys.stderr)
-        print(
-            "\nRe-run to try again. Validation happens before any write, so a "
-            "failed generation never leaves a half-built integration behind.",
-            file=sys.stderr,
-        )
         return EXIT_CONFIG
 
+    policy_path = Path(args.config_dir) / "policy.yaml"
+
     if args.dry_run:
-        for name, body in (
-            ("detguard_adapter.py", bundle.adapter_code),
-            ("manifest.yaml", bundle.manifest_text),
-            ("roles.yaml", bundle.roles_text),
-        ):
-            print(f"\n{'=' * 70}\n{name}\n{'=' * 70}\n{body}")
-        print(f"\n{'=' * 70}\npolicy.yaml (derived, not generated)\n{'=' * 70}")
         import yaml as _yaml
 
+        print(f"\n{'=' * 70}\npolicy.yaml (derived)\n{'=' * 70}")
         print(_yaml.safe_dump(bundle.policy, sort_keys=False))
         print("dry run — nothing written")
         return EXIT_OK
 
     try:
-        written = authoring.write_bundle(
-            bundle,
-            config_dir=args.config_dir,
-            adapter_path=args.adapter_out,
-            overwrite=args.overwrite,
-        )
+        written = [authoring.write_policy(bundle, policy_path, overwrite=args.overwrite)]
     except authoring.AuthoringError as exc:
         print(f"detguard: {exc}", file=sys.stderr)
         return EXIT_CONFIG
 
-    # Deterministic, and deliberately not part of what the model produced.
     workflow = Path(args.workflow)
     run_config = RunConfig(
-        manifest=str(Path(args.config_dir) / "manifest.yaml"),
-        roles=str(Path(args.config_dir) / "roles.yaml"),
-        policy=str(Path(args.config_dir) / "policy.yaml"),
-        adapter=AdapterConfig(
-            kind="generic",
-            agent=f"{Path(args.adapter_out).stem}:build_adapter",
-        ),
+        manifest=str(manifest_path),
+        roles=str(roles_path),
+        policy=str(policy_path),
+        adapter=AdapterConfig(kind="generic", agent=args.adapter_import),
     )
     workflow.parent.mkdir(parents=True, exist_ok=True)
     workflow.write_text(generate_workflow(run_config), encoding="utf-8")
     written.append(workflow)
 
-    print("\nwrote:")
+    print("wrote:")
     for path in written:
         print(f"  {path}")
 
@@ -533,21 +526,23 @@ def _cmd_scaffold(args: argparse.Namespace) -> int:
             print(f"  {gap}")
 
     print(
-        "\nRead the adapter and roles.yaml before committing. A role classified\n"
-        "too loosely is a gate that never fires, and it looks exactly like one\n"
-        "that works. Then:\n"
-        f"  detguard corpus build --manifest {Path(args.config_dir) / 'manifest.yaml'} "
-        f"--roles {Path(args.config_dir) / 'roles.yaml'} --out corpus/attacks"
+        "\nRead policy.yaml before committing — a role classified too loosely "
+        "in roles.yaml is a gate that never fires, and it looks exactly like "
+        "one that works. Then:\n"
+        f"  detguard corpus build --manifest {manifest_path} "
+        f"--roles {roles_path} --out corpus/attacks"
     )
     return EXIT_OK
 
 
 def _load_adapter(args: argparse.Namespace):
-    """Resolve --adapter / --graph / --agent into a live BaseAdapter."""
-    if args.graph and args.agent:
+    """Resolve --adapter / --graph / --agent-obj / --agent into a live BaseAdapter."""
+    agent_obj = getattr(args, "agent_obj", None)
+    built_flags = [name for name, val in (("--graph", args.graph), ("--agent-obj", agent_obj)) if val]
+    if built_flags and args.agent:
         raise ValueError(
-            "pass either --graph (the CLI builds the adapter) or --agent "
-            "module:factory (you build it), not both"
+            f"pass either {built_flags[0]} (the CLI builds the adapter) or "
+            "--agent module:factory (you build it), not both"
         )
 
     if args.graph:
@@ -564,6 +559,19 @@ def _load_adapter(args: argparse.Namespace):
             )
         return _build_langgraph_adapter(args)
 
+    if agent_obj:
+        if args.adapter != "openai_agents":
+            raise ValueError(
+                f"--agent-obj is openai_agents-specific; got --adapter {args.adapter}"
+            )
+        if not args.reset:
+            # Same reasoning as --graph above: caught here, not mid-run.
+            raise ValueError(
+                "--agent-obj needs --reset module:function — without fresh state "
+                "per attack, results leak between cases and the run cannot be trusted"
+            )
+        return _build_openai_agents_adapter(args)
+
     if args.agent:
         return _resolve_import(args.agent, "--agent")()
 
@@ -575,8 +583,9 @@ def _load_adapter(args: argparse.Namespace):
         )
     if args.adapter == "openai_agents":
         raise ValueError(
-            "--adapter openai_agents needs --agent module:factory returning a "
-            "configured OpenAIAgentsAdapter"
+            "--adapter openai_agents needs either --agent-obj module:agent --reset "
+            "module:function, or --agent module:factory returning a configured "
+            "OpenAIAgentsAdapter"
         )
     raise ValueError(
         "--adapter generic needs --agent module:factory, e.g. "
@@ -784,10 +793,19 @@ def build_parser() -> argparse.ArgumentParser:
         "the LangGraphAdapter for you, so no adapter file is needed",
     )
     p_init.add_argument(
+        "--agent-obj",
+        default=None,
+        metavar="module:agent",
+        help="openai_agents only: import path to an agents.Agent instance. "
+        "detguard builds the OpenAIAgentsAdapter for you, so no adapter file "
+        "is needed. Distinct from --agent, which names a factory",
+    )
+    p_init.add_argument(
         "--reset",
         default=None,
         metavar="module:function",
-        help="langgraph only: import path to the per-attack state reset hook",
+        help="langgraph/openai_agents only: import path to the per-attack "
+        "state reset hook",
     )
     p_init.add_argument(
         "--tools",
@@ -800,8 +818,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-reader",
         default=None,
         metavar="module:function",
-        help="langgraph only: fn(path) -> value, for success checks that read "
-        "post-attack state",
+        help="langgraph/openai_agents only: fn(path) -> value, for success "
+        "checks that read post-attack state",
     )
     p_init.add_argument(
         "--agent-name",
@@ -811,80 +829,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_init.set_defaults(_handler=_cmd_init)
 
-    # detguard scaffold -----------------------------------------------------
-    p_scaffold = sub.add_parser(
-        "scaffold",
-        help="generate an adapter, manifest, roles, policy and CI workflow from source",
+    # detguard derive ---------------------------------------------------------
+    p_derive = sub.add_parser(
+        "derive",
+        help="derive policy.yaml and a CI workflow from a hand-written manifest + roles",
         description=(
-            "Read an agent's source and generate the integration files. The "
-            "adapter and the role classification come from a model; the policy "
-            "is derived from the roles by rule and the CI workflow is "
-            "generated deterministically. Everything is validated before it is "
-            "written, and everything is a DRAFT for you to review — a role "
-            "classified too loosely is a gate that never fires."
+            "detguard_adapter.py, manifest.yaml and roles.yaml are written by "
+            "a human who has read the agent's source — see docs/integration.md "
+            "for the pattern and the role-classification checklist. This "
+            "command validates the manifest and role map and derives the "
+            "policy from the role map by rule; the CI workflow is generated "
+            "deterministically too. No model, no network call, no API key."
         ),
     )
-    p_scaffold.add_argument(
-        "--source-dir",
-        default=".",
-        help="directory holding the agent's source (default: the current one)",
+    p_derive.add_argument("--manifest", required=True, help="path to a hand-written manifest.yaml")
+    p_derive.add_argument("--roles", required=True, help="path to a hand-written roles.yaml")
+    p_derive.add_argument(
+        "--arg-hints",
+        default=None,
+        help="path to an ARG_HINTS-shaped yaml file naming each tool's destination_arg "
+        "/ amount_arg — see docs/integration.md",
     )
-    p_scaffold.add_argument(
-        "--entry",
+    p_derive.add_argument(
+        "--adapter-import",
         required=True,
-        metavar="module:function",
-        help="how the agent is invoked, e.g. agent:run_agent",
+        metavar="module:factory",
+        help="import path to the hand-written adapter's zero-arg factory, e.g. "
+        "myapp.detguard_adapter:build_adapter — recorded in the generated CI "
+        "workflow, not read by this command",
     )
-    p_scaffold.add_argument(
-        "--reset",
-        default=None,
-        metavar="module:function",
-        help="the per-attack state reset, if you already know it. Inferred from "
-        "source when omitted",
-    )
-    p_scaffold.add_argument("--agent-name", default=None, help="name recorded in the manifest")
-    p_scaffold.add_argument(
-        "--model",
-        default="claude-sonnet-5",
-        help="model that writes the adapter and classifies roles",
-    )
-    p_scaffold.add_argument(
-        "--provider",
-        default=None,
-        choices=["anthropic", "openai"],
-        help="inferred from --model when omitted",
-    )
-    p_scaffold.add_argument(
-        "--base-url",
-        default=None,
-        help="OpenAI-compatible endpoint, for Groq/Together/a local server",
-    )
-    p_scaffold.add_argument(
-        "--api-key",
-        default=None,
-        help="default: DETGUARD_API_KEY, then ANTHROPIC_API_KEY / OPENAI_API_KEY",
-    )
-    p_scaffold.add_argument("--config-dir", default="config", help="where the YAML goes")
-    p_scaffold.add_argument(
-        "--adapter-out", default="detguard_adapter.py", help="where the adapter goes"
-    )
-    p_scaffold.add_argument(
+    p_derive.add_argument("--config-dir", default="config", help="where policy.yaml goes")
+    p_derive.add_argument(
         "--workflow",
         default=".github/workflows/detguard-gate.yml",
         help="where the CI workflow goes",
     )
-    p_scaffold.add_argument(
-        "--dry-run", action="store_true", help="print everything, write nothing"
+    p_derive.add_argument(
+        "--dry-run", action="store_true", help="print the derived policy, write nothing"
     )
-    p_scaffold.add_argument(
-        "--print-prompt",
-        action="store_true",
-        help="print the prompt and exit without calling a model — no key needed",
-    )
-    p_scaffold.add_argument(
+    p_derive.add_argument(
         "--overwrite", action="store_true", help="replace files that already exist"
     )
-    p_scaffold.set_defaults(_handler=_cmd_scaffold)
+    p_derive.set_defaults(_handler=_cmd_derive)
 
     # detguard corpus ------------------------------------------------------
     p_corpus = sub.add_parser(
@@ -913,6 +899,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--templates",
         default=None,
         help="template directory (defaults to the shipped corpus)",
+    )
+    p_corpus_build.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="TPL-ID",
+        help="leave a template out entirely (repeatable), e.g. --exclude TPL-04 "
+        "for a known-bad template — reported under skipped, not silently dropped",
     )
     p_corpus_build.set_defaults(_handler=_cmd_corpus_build)
     p_corpus.set_defaults(_handler=lambda args: _pending("corpus", 4))
@@ -978,11 +972,19 @@ def build_parser() -> argparse.ArgumentParser:
         "into a LangGraphAdapter here instead of in a factory of your own",
     )
     p_run.add_argument(
+        "--agent-obj",
+        default=None,
+        metavar="module:agent",
+        help="--adapter openai_agents only: import path to an agents.Agent "
+        "instance, built into an OpenAIAgentsAdapter here instead of in a "
+        "factory of your own. Distinct from --agent, which names a factory",
+    )
+    p_run.add_argument(
         "--reset",
         default=None,
         metavar="module:function",
-        help="--adapter langgraph only: per-attack state reset hook, required "
-        "with --graph",
+        help="--adapter langgraph/openai_agents only: per-attack state reset "
+        "hook, required alongside --graph or --agent-obj",
     )
     p_run.add_argument(
         "--tools",
@@ -995,8 +997,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--state-reader",
         default=None,
         metavar="module:function",
-        help="--adapter langgraph only: fn(path) -> value. Without it, state-based "
-        "success checks cannot be evaluated and are reported as such",
+        help="--adapter langgraph/openai_agents only: fn(path) -> value. "
+        "Without it, state-based success checks cannot be evaluated and are "
+        "reported as such",
     )
     p_run.add_argument(
         "--agent-name",

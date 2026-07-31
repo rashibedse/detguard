@@ -89,6 +89,22 @@ class _StubAdapter:
         }
 
 
+class _StubOpenAIAgentsAdapter:
+    """Stands in for OpenAIAgentsAdapter so these tests need no openai-agents install."""
+
+    def __init__(self, agent, reset_hook=None, agent_name="openai-agent"):
+        self.agent = agent
+        self.reset_hook = reset_hook
+        self.agent_name = agent_name
+
+    def introspect(self) -> dict:
+        return {
+            "agent": self.agent_name,
+            "framework": "openai_agents",
+            "tools": [{"name": "send_money", "description": "", "params": {}}],
+        }
+
+
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """A client project laid out the way a real one is: graph here, reset there."""
@@ -113,7 +129,10 @@ def _init_args(**overrides) -> argparse.Namespace:
         out="manifest.yaml",
         agent=None,
         graph=None,
+        agent_obj=None,
         reset=None,
+        tools=None,
+        state_reader=None,
         agent_name=None,
     )
     args.update(overrides)
@@ -165,12 +184,50 @@ def test_init_graph_without_reset_is_allowed_because_introspection_is_read_only(
     assert cli._cmd_init(_init_args(graph="agent.graph:graph")) == cli.EXIT_OK
 
 
+def test_init_builds_the_adapter_from_agent_obj(project, monkeypatch, capsys):
+    monkeypatch.setattr(
+        "detguard.adapters.openai_agents.OpenAIAgentsAdapter",
+        _StubOpenAIAgentsAdapter,
+        raising=True,
+    )
+
+    rc = cli._cmd_init(
+        _init_args(
+            framework="openai_agents",
+            agent_obj="agent.graph:graph",
+            agent_name="support-agent",
+        )
+    )
+
+    assert rc == cli.EXIT_OK
+    manifest = yaml.safe_load((project / "manifest.yaml").read_text())
+    assert manifest["agent"] == "support-agent"
+    assert manifest["framework"] == "openai_agents"
+    assert [t["name"] for t in manifest["tools"]] == ["send_money"]
+
+
+def test_init_agent_obj_without_reset_is_allowed_because_introspection_is_read_only(
+    project, monkeypatch
+):
+    monkeypatch.setattr(
+        "detguard.adapters.openai_agents.OpenAIAgentsAdapter", _StubOpenAIAgentsAdapter
+    )
+    assert cli._cmd_init(
+        _init_args(framework="openai_agents", agent_obj="agent.graph:graph")
+    ) == cli.EXIT_OK
+
+
 @pytest.mark.parametrize(
     "overrides, expected",
     [
         (dict(graph="agent.graph:graph", agent="a:b"), "not both"),
         (dict(graph="agent.graph:graph", framework="generic"), "langgraph-specific"),
-        (dict(agent="a:b", reset="db.seed:seed"), "only applies alongside --graph"),
+        (
+            dict(agent_obj="agent.graph:graph", agent="a:b", framework="openai_agents"),
+            "not both",
+        ),
+        (dict(agent_obj="agent.graph:graph", framework="langgraph"), "openai_agents-specific"),
+        (dict(agent="a:b", reset="db.seed:seed"), "only applies alongside"),
         (dict(graph="agent.graph"), "must be 'module:attribute'"),
         (dict(graph="no_such_module:graph"), "could not build"),
     ],
@@ -239,7 +296,15 @@ def test_init_without_agent_or_graph_still_writes_a_skeleton(project, capsys):
 
 
 def _run_args(**overrides) -> argparse.Namespace:
-    args = dict(adapter="langgraph", agent=None, graph=None, reset=None, agent_name=None)
+    args = dict(
+        adapter="langgraph",
+        agent=None,
+        graph=None,
+        agent_obj=None,
+        reset=None,
+        agent_name=None,
+        state_reader=None,
+    )
     args.update(overrides)
     return argparse.Namespace(**args)
 
@@ -259,6 +324,27 @@ def test_load_adapter_requires_reset_for_run_not_just_at_first_attack(project):
         cli._load_adapter(_run_args(graph="agent.graph:graph"))
 
 
+def test_load_adapter_builds_an_openai_agents_adapter_from_flags(project, monkeypatch):
+    monkeypatch.setattr(
+        "detguard.adapters.openai_agents.OpenAIAgentsAdapter", _StubOpenAIAgentsAdapter
+    )
+    adapter = cli._load_adapter(
+        _run_args(
+            adapter="openai_agents",
+            agent_obj="agent.graph:graph",
+            reset="db.seed:seed",
+            agent_name="support",
+        )
+    )
+    assert adapter.agent_name == "support"
+    assert adapter.reset_hook is not None
+
+
+def test_load_adapter_requires_reset_for_agent_obj_not_just_at_first_attack(project):
+    with pytest.raises(ValueError, match="--agent-obj needs --reset"):
+        cli._load_adapter(_run_args(adapter="openai_agents", agent_obj="agent.graph:graph"))
+
+
 @pytest.mark.parametrize(
     "overrides, expected",
     [
@@ -267,9 +353,14 @@ def test_load_adapter_requires_reset_for_run_not_just_at_first_attack(project):
             dict(adapter="generic", graph="agent.graph:graph", reset="db.seed:seed"),
             "langgraph-specific",
         ),
+        (
+            dict(adapter="langgraph", agent_obj="agent.graph:graph", reset="db.seed:seed"),
+            "openai_agents-specific",
+        ),
+        (dict(adapter="openai_agents", agent_obj="agent.graph:graph", agent="a:b"), "not both"),
         (dict(), "needs either --graph"),
         (dict(adapter="generic"), "needs --agent module:factory"),
-        (dict(adapter="openai_agents"), "needs --agent module:factory"),
+        (dict(adapter="openai_agents"), "needs either --agent-obj"),
     ],
 )
 def test_load_adapter_rejects_incoherent_flag_combinations(project, overrides, expected):

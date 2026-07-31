@@ -74,6 +74,27 @@ def test_all_sixteen_templates_load():
     assert [t.id for t in templates] == [f"TPL-{i:02d}" for i in range(1, 17)]
 
 
+def test_excluded_templates_are_left_out_of_load_templates():
+    templates = load_templates(exclude=["TPL-04"])
+    assert "TPL-04" not in [t.id for t in templates]
+    assert len(templates) == 15
+
+
+def test_build_reports_excluded_templates_as_skipped(tmp_path):
+    result = build(
+        manifest_path=FIXTURE_MANIFEST,
+        roles_path=FIXTURE_ROLES,
+        out_dir=tmp_path / "attacks",
+        exclude=["TPL-04"],
+    )
+
+    assert "TPL-04" not in {a.template_id for a in result.attacks}
+    skipped_ids = {s["id"] for s in result.skipped}
+    assert "TPL-04" in skipped_ids
+    reason = next(s["reason"] for s in result.skipped if s["id"] == "TPL-04")
+    assert reason == "excluded via --exclude"
+
+
 def test_every_template_binds_to_the_fixture_manifest():
     """The fixture covers all nine roles deliberately.
 

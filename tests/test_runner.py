@@ -303,13 +303,38 @@ def test_selecting_a_missing_id_fails_loudly():
         filter_attacks([attack(id="a")], attack_id="nope")
 
 
-def test_an_adapter_failure_is_an_infrastructure_error_not_a_clean_sweep():
+def test_an_adapter_failure_is_recorded_not_raised_and_not_a_clean_sweep():
+    """A single agent crash (e.g. a hallucinated tool call) must not read as a
+    clean sweep, and must not abort every attack after it in the batch."""
+
     class Broken(CountingAdapter):
         def invoke(self, user_prompt, injected_context=None):
             raise RuntimeError("agent exploded")
 
-    with pytest.raises(RunnerError, match="adapter.invoke failed"):
-        run_one(attack(), Broken(), permissive_policy(), mode="on")
+    result = run_one(attack(), Broken(), permissive_policy(), mode="on")
+    assert result["outcome"] == "adapter_error"
+    assert result["succeeded"] is False
+    assert "agent exploded" in result["error"]
+
+
+def test_one_adapter_failure_does_not_abort_the_rest_of_the_batch():
+    class FlakyOnce(CountingAdapter):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.calls_made = 0
+
+        def invoke(self, user_prompt, injected_context=None):
+            self.calls_made += 1
+            if self.calls_made == 1:
+                raise RuntimeError("hallucinated a tool named commentary")
+            return super().invoke(user_prompt, injected_context)
+
+    adapter = FlakyOnce(calls=[("get_balance", {}, "4820.55")])
+    results = run([attack(id="a"), attack(id="b")], adapter, permissive_policy(), mode="on")
+    outcomes = {r["id"]: r["outcome"] for r in results["results"]}
+    assert outcomes["a"] == "adapter_error"
+    assert outcomes["b"] != "adapter_error"
+    assert results["summary"]["adapter_errors"] == 1
 
 
 def test_an_unknown_guardrail_mode_is_rejected():

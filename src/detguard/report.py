@@ -202,9 +202,32 @@ def _measurement(results: dict, unguarded: dict | None) -> dict:
     summary = results.get("summary") or {}
     total = int(summary.get("total") or 0)
     inconclusive = int(summary.get("inconclusive") or 0)
+    adapter_errors = int(summary.get("adapter_errors") or 0)
     by_cause = dict(summary.get("inconclusive_by_cause") or {})
 
     warnings: list[dict] = []
+    if adapter_errors:
+        warnings.append(
+            {
+                "kind": "ADAPTER_ERRORS",
+                "detail": (
+                    f"{adapter_errors} of {total} attack(s) raised out of "
+                    "adapter.invoke() instead of producing a result — e.g. the "
+                    "agent emitted a tool call detguard's adapter could not "
+                    "dispatch. Counted as neither defended nor breached, "
+                    "because nothing was observed."
+                ),
+                "causes": [
+                    {
+                        "code": r["id"],
+                        "count": 1,
+                        "explanation": r.get("error", ""),
+                    }
+                    for r in results.get("results", [])
+                    if r.get("outcome") == "adapter_error"
+                ],
+            }
+        )
     if inconclusive:
         warnings.append(
             {
@@ -254,10 +277,11 @@ def _measurement(results: dict, unguarded: dict | None) -> dict:
 
     return {
         "coverage": summary.get("coverage", 1.0 if total else 0.0),
-        "evaluated": total - inconclusive,
+        "evaluated": total - inconclusive - adapter_errors,
         "total": total,
         "inconclusive": inconclusive,
         "inconclusive_by_cause": by_cause,
+        "adapter_errors": adapter_errors,
         "warnings": warnings,
         "trustworthy": not warnings,
     }
