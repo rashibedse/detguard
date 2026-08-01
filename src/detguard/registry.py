@@ -554,6 +554,10 @@ ACTIONS = {"block", "redact", "require_hitl", "warn", "limit", "notify"}
 #: from a hard block via ``requires_approval``.
 BLOCKING_ACTIONS = {"block", "require_hitl"}
 
-#: Conditions that ship disabled and must be turned on deliberately, e.g. via
-#: ``detguard run --enable-layer llm_judge``.
-DISABLED_BY_DEFAULT = {"llm_judge"}
+# `llm_judge` shipping disabled is enforced by `enabled: false` on its rule in
+# policies/default.yaml, not by anything in this module — a `DISABLED_BY_DEFAULT
+# = {"llm_judge"}` constant used to sit here, unread by any code including
+# policy.py's own loader, claiming to be the mechanism it wasn't. Removed
+# rather than wired in: making it authoritative is a behavior change, and the
+# real gate (the YAML `enabled` flag, turned on via `--enable-layer`) already
+# works without it.

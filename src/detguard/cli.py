@@ -21,9 +21,9 @@ from typing import Any, Sequence
 
 from . import __version__
 
-EXIT_OK = 0
-EXIT_REGRESSION = 1
-EXIT_CONFIG = 2
+# Canonical values live in baseline.py — imported, not redeclared, so the two
+# files cannot drift apart on what exit code means what.
+from .baseline import EXIT_CONFIG, EXIT_OK
 
 
 def _new_run_dir() -> Path:
@@ -774,12 +774,19 @@ def _write_run_manifest(run_dir: Path, args: argparse.Namespace, results: dict, 
     import yaml
 
     s = results.get("summary", {})
-    # `--adapter` is only consulted when detguard builds the adapter itself.
-    # With `--agent module:factory` the factory decides, and recording the
-    # ignored flag put `adapter: generic` next to `adapter_name: openai_agents`
-    # in the same file — an artifact that contradicts itself is worse than one
-    # that stays quiet, so the ignored value is omitted rather than preserved.
-    adapter_flag = None if getattr(args, "agent", None) else args.adapter
+    # `--adapter`, `--tools`, `--reset` and `--state-reader` are only consulted
+    # when detguard builds the adapter itself, via `--graph` or `--agent-obj`.
+    # With `--agent module:factory` the factory decides everything and none of
+    # these four are read — recording them anyway is how `adapter: generic`
+    # ended up next to `adapter_name: openai_agents` in the same file, and the
+    # other three are the same failure mode: a flag the run never touched,
+    # written down as if it had. Omitted rather than preserved when `--agent`
+    # was the path actually taken.
+    used_own_adapter = bool(getattr(args, "agent", None))
+    adapter_flag = None if used_own_adapter else args.adapter
+    tools_flag = None if used_own_adapter else getattr(args, "tools", None)
+    reset_flag = None if used_own_adapter else getattr(args, "reset", None)
+    state_reader_flag = None if used_own_adapter else getattr(args, "state_reader", None)
     manifest = {
         "generated_at": results.get("generated_at", ""),
         "command": {
@@ -788,9 +795,9 @@ def _write_run_manifest(run_dir: Path, args: argparse.Namespace, results: dict, 
             "adapter": adapter_flag,
             "guardrail": args.guardrail,
             "graph": getattr(args, "graph", None),
-            "tools": getattr(args, "tools", None),
-            "reset": getattr(args, "reset", None),
-            "state_reader": getattr(args, "state_reader", None),
+            "tools": tools_flag,
+            "reset": reset_flag,
+            "state_reader": state_reader_flag,
             "agent": getattr(args, "agent", None),
             "enable_layer": list(getattr(args, "enable_layer", []) or []),
             "id": getattr(args, "id", None),

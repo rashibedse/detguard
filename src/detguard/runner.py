@@ -354,8 +354,10 @@ def run_one(
         # A `redact` action is not advisory. If the policy masked the document,
         # the masked version is what the agent must actually receive — reporting
         # a redaction and then handing over the original would make the whole
-        # decision trace fiction.
-        if retrieved.text and retrieved.text != payload:
+        # decision trace fiction. Keyed on the explicit flag, matching every
+        # other write-back site in this function — a text-diff heuristic here
+        # would answer the same question a second, weaker way.
+        if retrieved.redacted and retrieved.text:
             effective_payload = retrieved.text
 
     # Real prevention, where the adapter can offer it. The guard runs inside

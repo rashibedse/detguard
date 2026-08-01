@@ -37,6 +37,23 @@ reads it from a context variable that :func:`run` sets automatically and a
 framework host sets with :func:`set_turn`. Without it ``ungrounded_arg`` cannot
 ground anything, and rather than guess it declines — so a host that forgets
 ``set_turn`` loses that condition silently. Set it.
+
+Not the same thing as ``runner.py``, on purpose. That module drives a corpus
+against *somebody else's* adapter for measurement — it scores a turn, it does
+not deliver one. This module is what you'd actually put in a production agent
+loop. They independently reimplement the same hook-sequencing and
+redaction-write-back bookkeeping (there is no shared helper), so a fix to one
+kind of bug — e.g. "a fired redact rule must change what the caller sees" — has
+to be checked against both files, not assumed to carry over.
+
+One consequence of the split worth knowing: :func:`run` gets genuine
+pre-execution enforcement for free, because it owns both ``decide`` and
+``execute`` and calls ``before_tool`` in between. ``runner.py`` only gets that
+same guarantee when the adapter under test opts in via
+``BaseAdapter.set_tool_guard`` — without one, its ``before_tool`` runs after
+the framework's own loop has already finished, and a "blocked" result there
+means "would have stopped it", not "did". Both modules report a `blocked`
+outcome; only one of the two ever means it unconditionally.
 """
 
 from __future__ import annotations
@@ -46,7 +63,7 @@ import contextvars
 import functools
 import inspect
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import engine
 from .events import ToolCall, Verdict

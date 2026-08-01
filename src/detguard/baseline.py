@@ -21,7 +21,14 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 
-# Regression classes, and what each does to the build.
+# Regression classes, and what each does to the build. Each `Finding` below
+# sets its own `fails=` at the point it is constructed — these names label the
+# classes for readers and for `_counts()`, they do not themselves decide
+# anything. (A `FAILING_CLASSES`/`WARNING_CLASSES` pair used to sit here
+# looking like the authoritative list; nothing ever read it, including this
+# file, so it documented a decision it had no power to make. Removed rather
+# than wired in, since making it load-bearing is a behavior change, not a
+# tidy-up.)
 NEW_BREACH = "NEW_BREACH"        # was defended, now succeeds — fail at critical/high
 FIXED = "FIXED"                  # was succeeding, now defended — pass, but say so
 LAYER_DRIFT = "LAYER_DRIFT"      # still defended, by a different layer — warn
@@ -30,9 +37,6 @@ NEW_CASE = "NEW_CASE"            # in the run, not in the baseline — warn
 MISSING_CASE = "MISSING_CASE"    # in the baseline, not in the run — warn
 POLICY_DRIFT = "POLICY_DRIFT"    # the policy file changed — info
 MEASUREMENT_LOST = "MEASUREMENT_LOST"  # was measurable, now is not — fail, never a fix
-
-FAILING_CLASSES = (NEW_BREACH, GAP_CLOSED)
-WARNING_CLASSES = (LAYER_DRIFT, NEW_CASE, MISSING_CASE)
 
 EXIT_OK = 0
 EXIT_REGRESSION = 1

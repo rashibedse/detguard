@@ -54,7 +54,7 @@ __all__ = [
     "GuardrailStop",
     "Blocked",
     "ApprovalRequired",
-    "TurnResult"
+    "TurnResult",
     # event model
     "HOOKS",
     "SEVERITIES",
