@@ -116,9 +116,12 @@ policy and the workflow are *derived* by rule. Enforcement is untouched: it
 still runs deterministic conditions over a file you reviewed and committed.
 See [docs/scaffold.md](docs/scaffold.md).
 
-`streamlit run dashboard/setup.py` turns the same artifacts into forms that
-validate before they write — the hand-editing path below still works, these
-are the shortcuts.
+Two dashboards, two different jobs. `streamlit run dashboard/setup.py` is a
+config wizard — it turns manifest/roles/policy/CI into forms that validate
+before they write; the hand-editing path below still works, this is the
+shortcut. `streamlit run dashboard/app.py` is the results viewer — point it at
+a directory of `results-*.json` and it renders the KPIs, coverage, and
+per-attack trace shown above. Neither one executes a tool or invokes an agent.
 
 ## Design commitments
 
