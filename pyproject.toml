@@ -39,7 +39,17 @@ langgraph = [
     "langchain-core>=0.3",
 ]
 openai = [
-    "openai>=1.40",
+    # The adapter imports `agents`, which ships in openai-agents, NOT in the
+    # `openai` client package (which it pulls in transitively). Depending on
+    # `openai` alone installs cleanly and then fails at adapter construction —
+    # with the ImportError hint that recommends this very extra.
+    #
+    # The floor is not cosmetic. `set_tool_guard` needs `tool_input_guardrails`
+    # on the tool objects, and an SDK without it is skipped by a `hasattr` check
+    # (adapters/openai_agents.py) — which silently downgrades a run from
+    # `prevented` to `detected` rather than failing. That is the one distinction
+    # this project refuses to let blur, so pin above the version that has it.
+    "openai-agents>=0.19",
 ]
 dashboard = [
     "streamlit>=1.36",

@@ -16,7 +16,167 @@ functions, which is the whole reason it can run inside a regulated network.
 `before_tool` is the one that distinguishes this from a text filter. The
 arguments are concrete by then, so the check is exact instead of probabilistic.
 
-## Minimal loop
+## Three ways to install enforcement
+
+Calling the four hooks in the right order, with the right arguments, is the part
+a host application has to get right — and every way of getting it wrong is
+silent. Pick the highest-level option your agent's shape allows.
+
+| | Use when | Hooks you get |
+|---|---|---|
+| `guarded.run()` | you own the loop | all four |
+| `guarded.guard()` | a framework owns the loop | `before_tool`, `after_tool` |
+| the four hooks by hand | you need control the other two do not give | all four, your ordering |
+
+### `guarded.run()` — you own the loop
+
+```python
+from detguard import guarded, policy
+
+policy_set = policy.load("guardrail/policy.yaml")
+
+result = guarded.run(
+    user_text,
+    policy_set,
+    decide=my_planner,        # fn(prompt, calls_so_far, retrieved) -> [(name, args), ...]
+    execute={"get_balance": get_balance, "send_money": send_money},
+    summarise=lambda prompt, calls: compose_answer(calls),
+    retrieved=fetched_document,
+)
+
+if result.refused:
+    return refuse(result)
+return result.output
+```
+
+`decide` is called repeatedly until it returns nothing, so an agent that reads a
+document and *then* decides what to do with it works — which is what real agents
+do, and what a single decide-then-execute batch cannot express.
+
+`max_rounds` defaults to 8, and exhausting it **raises `RuntimeError`** rather
+than returning what it had — an agent still asking for tools after 8 rounds is a
+bug or a denial of service, not a turn to summarise. Note that the exception
+discards the `TurnResult`, including the decision trace for calls that already
+executed, so catch it if you need that record.
+
+It never raises on a block: enforcement stopping a turn is an outcome, not an
+error. Read it off the [`TurnResult`](#reading-a-turnresult).
+
+`retrieved` is checked as retrieved content, which is the flag separating "the
+user said this" from "a document said this" — and if a redaction fires on it,
+`result.retrieved` holds the masked version the agent actually saw.
+
+`execute` callables must be **synchronous**. See [Async tools](#async-tools).
+
+### `guarded.guard()` — a framework owns the loop
+
+A decorator on the tool rather than the orchestration, which is why the same one
+works on LangChain, LangGraph and the Agents SDK — a tool is a plain callable in
+all three. Put it **below** the framework's own decorator so it wraps the
+function:
+
+```python
+from detguard import guarded
+
+@tool                              # LangChain/LangGraph, or @function_tool
+@guarded.guard(policy_set)
+def send_money(destination: str, amount: float) -> str: ...
+```
+
+It raises rather than returning a verdict, because a framework's tool-calling
+machinery has nowhere to put one:
+
+```python
+try:
+    answer = agent.invoke(user_text)
+except guarded.ApprovalRequired as stop:
+    return escalate(stop.verdict)      # a human may still say yes
+except guarded.Blocked as stop:
+    return refuse(stop.verdict)        # a hard stop
+```
+
+Both subclass `guarded.GuardrailStop`, and they are separate types on purpose —
+catching only the base class collapses an approval prompt into a refusal.
+
+**Set the turn prompt, or lose a layer.** The decorator cannot see the original
+request, so it reads one from a context variable:
+
+```python
+with guarded.turn(user_text):
+    answer = agent.invoke(user_text)
+```
+
+`guarded.run()` does this for you. Under a framework it is yours to do, and
+without it `ungrounded_arg` — the condition that catches an injected destination
+— declines to fire rather than guessing. Nothing warns you.
+
+**Three limits, stated because a silent gap is worse than a documented one.**
+
+**It is sync-only** — see [Async tools](#async-tools) below, which applies to
+`run()` equally.
+
+**It sees one call, not the batch**, so `call_budget`, `repeated_call` and
+anything reasoning over a whole decided batch cannot do their job through it.
+Use `run()` or the framework's own batch hook when those matter.
+
+**It carries `before_tool`/`after_tool` only** — the other two need
+per-framework wiring.
+
+### Async tools
+
+**Neither `run()` nor `guard()` awaits, so an `async def` tool silently loses
+`after_tool`.** The tool is called but not awaited, so `call.result` holds the
+coroutine object rather than the value, and every result-inspecting condition
+examines a coroutine and finds nothing in it. The call still runs, and its result
+still reaches the agent — unchecked and unredacted.
+
+```python
+@guarded.guard(policy_set)
+def read_note() -> str: ...        # after_tool fires; a leaked secret is blocked
+
+@guarded.guard(policy_set)
+async def read_note() -> str: ...  # after_tool sees a coroutine; the secret gets through
+```
+
+`guarded.run(execute={"read_note": read_note})` behaves the same way for the
+same reason — this is a property of the module, not of the decorator.
+
+`before_tool` is unaffected either way: arguments are concrete before the
+coroutine is ever created, so the HITL gate and every argument-level rule still
+hold. It is specifically `after_tool` — result inspection and redaction — that
+goes quiet.
+
+This matters because tools in all three frameworks above are commonly async.
+Until it is fixed, **hand `guarded` a synchronous callable** and do the awaiting
+inside it:
+
+```python
+@guarded.guard(policy_set)
+def read_note() -> str:
+    return asyncio.run(_read_note_async())   # after_tool sees a str again
+```
+
+### Reading a `TurnResult`
+
+```python
+result.allowed            # False if anything stopped the turn
+result.refused            # not allowed
+result.requires_approval  # a human may still clear it
+result.output             # the final answer, post-redaction, "" if stopped
+result.tool_calls         # every ToolCall, with .result set
+result.retrieved          # the document as the agent saw it, post-redaction
+result.blocked_at_hook    # which of the four
+result.blocked_by         # the rule id
+result.severity
+result.decisions          # every rule evaluated, fired or not
+result.to_dict()          # JSON-ready, for your own audit sink
+```
+
+## Calling the four hooks by hand
+
+Everything below is what `guarded` does for you. Reach for it when neither shape
+above fits — but the four mistakes it exists to prevent are all silent, so read
+the notes after the snippet before choosing this path.
 
 ```python
 from detguard import engine, policy
@@ -49,7 +209,13 @@ def handle(user_text: str) -> str:
     return v.text if v.allow else refuse(v)
 ```
 
-Four things about that snippet are load-bearing.
+Five things about that snippet are load-bearing.
+
+**Retrieved content gets its own `before_input`.** The snippet above only checks
+the user's message. Any document the agent fetched needs a second call with
+`is_retrieved=True` — that flag is what separates "the user said this" from "a
+document said this", and skipping it removes the entire indirect-injection
+defence. `guarded.run(retrieved=...)` does it for you.
 
 **`user_prompt` goes to every hook.** Several conditions cannot work without
 the original request — `ungrounded_arg` above all, which is what catches a
@@ -374,6 +540,31 @@ measured false-positive rate.
 
 ### OpenAI Agents SDK
 
+As with LangGraph, you do not need an adapter file. Point the CLI at the
+`agents.Agent` instance itself with `--agent-obj`:
+
+```bash
+detguard init --framework openai_agents \
+  --agent-obj myapp.agent:support_agent \
+  --out config/manifest.yaml
+
+detguard run --corpus corpus/attacks --policy config/policy.yaml \
+  --adapter openai_agents --agent-obj myapp.agent:support_agent \
+  --reset db.seed:reset --guardrail on --run-dir runs/first
+```
+
+`--agent-obj` is a `module:attribute` import string and is deliberately distinct
+from `--agent`, which names a zero-arg *factory*. `--reset` is optional for
+`init`, which only reads metadata, and required for `run`, which needs fresh
+state per attack.
+
+`--state-reader myapp.detguard_state:read` works here too, exactly as it does
+for LangGraph above — state-based success checks need it, and without one they
+report as `inconclusive` rather than as defended.
+
+Write a factory and pass `--agent` instead when you need something the flags do
+not cover:
+
 ```python
 from detguard.adapters.openai_agents import OpenAIAgentsAdapter
 
@@ -385,9 +576,23 @@ def build_adapter():
     )
 ```
 
-Requires `pip install "detguard[openai]"`. The manifest is drafted from the
-SDK's own JSON Schema per tool — the same artifact you would publish in your
-API docs, and the reason onboarding never needs your source.
+Requires `pip install "detguard[openai]"`, which installs the `openai-agents`
+SDK. The manifest is drafted from the SDK's own JSON Schema per tool — the same
+artifact you would publish in your API docs, and the reason onboarding never
+needs your source.
+
+**This is the only adapter that *can* measure in `prevented` mode**, and it is
+worth reading that as conditional. It attaches the runner's guard to each tool's
+own `tool_input_guardrails`, and when that attaches, a block during a corpus run
+stops the call before the tool body runs. `set_tool_guard` returns False — and
+the run silently falls back to `detected` — when the agent has no tools, or when
+the installed SDK predates `tool_input_guardrails`. Check the `enforcement`
+field in `results.json` rather than assuming; that is what it is there for.
+
+Every other adapter has no such seam and evaluates hooks after `invoke()`
+returns — see the README's
+[`prevented` vs `detected`](../README.md#prevented-vs-detected--read-this-before-the-defense-rate)
+section, because the two must never be averaged into one defense rate.
 
 ## What DetGuard never does
 

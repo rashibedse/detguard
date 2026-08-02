@@ -51,6 +51,38 @@ v = engine.before_output(answer, policy_set, user_prompt=user_text)
 No framework dependency, no network, no daemon. Adapters for LangGraph and the
 OpenAI Agents SDK are thin wrappers over the same contract.
 
+### Or let detguard own the ordering
+
+Getting that sequence right is the client's job above, and every way of getting
+it wrong is silent — a missed retrieved-content check, an unthreaded
+`user_prompt`, a redaction reported but not applied, an approval collapsed into
+a refusal. So `detguard.guarded` ships the ordering itself, in two shapes.
+
+**You own the loop** — all four hooks, no sequencing to reproduce:
+
+```python
+from detguard import guarded
+
+result = guarded.run(user_text, policy_set, decide=my_planner,
+                     execute=MY_TOOLS, summarise=compose, retrieved=document)
+return result.output if result.allowed else refuse(result)
+```
+
+**A framework owns the loop** — a decorator on the tool, so the same one works
+on LangChain, LangGraph and the Agents SDK:
+
+```python
+@tool
+@guarded.guard(policy_set)
+def send_money(destination: str, amount: float) -> str: ...
+```
+
+It gives you `before_tool` and `after_tool` — the two that make this more than a
+text filter — and raises `Blocked` or `ApprovalRequired`, which are separate
+types so a pause a human could clear never reads as a hard refusal. Wrap the
+turn in `guarded.turn(user_text)` so `ungrounded_arg` can still see the original
+request. See [docs/integration.md](docs/integration.md) for both in full.
+
 ## Install
 
 Alpha, and not on PyPI yet — install from source:
@@ -182,7 +214,7 @@ These are not defaults. They are the reasons the rest is trustworthy.
 | Doc | What it answers |
 |---|---|
 | [quickstart.md](docs/quickstart.md) | Nothing to a dashboard in five minutes |
-| [scaffold.md](docs/scaffold.md) | Generating an integration for a framework-free agent |
+| [scaffold.md](docs/scaffold.md) | What `derive` fills in, and what stays hand-written |
 | [integration.md](docs/integration.md) | Where the four hooks go; all three adapters |
 | [policy-reference.md](docs/policy-reference.md) | Every condition, param and action |
 | [attack-corpus.md](docs/attack-corpus.md) | The 16 templates and the 8 mutations |

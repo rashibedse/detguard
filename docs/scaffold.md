@@ -77,6 +77,8 @@ a visible, fixable false positive. These are not errors of the same kind.
 | `--dry-run` | Prints the derived policy, writes nothing. |
 | `--overwrite` | Required to replace files that already exist. |
 | `--adapter-import module:factory` | Recorded in the generated CI workflow only — this command never reads or executes your adapter. |
+| `--config-dir path` | Where `policy.yaml` goes. Default `config/`. |
+| `--workflow path` | Where the CI workflow goes. Default `.github/workflows/detguard-gate.yml`. |
 
 ## Then
 

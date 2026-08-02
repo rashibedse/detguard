@@ -71,9 +71,22 @@ detguard report --results runs/demo/results-on.json \
 
 ```
 **1** succeeded · **31** blocked · **3** held for approval · **0** mitigated · defense rate **86.1%**
+
+> ⚠️ **Detection, not prevention.** This adapter offers no pre-execution seam, so
+> tool hooks ran after the agent had already completed its turn. A `blocked` row
+> means the policy *would* have stopped the call in a live integration — the side
+> effect has already happened here.
+
 Measured **36** of 36 attacks (coverage **100.0%**)
 Enforcement prevented **34** of 35 attacks that succeed unguarded.
 ```
+
+Do not skip that callout. `FixtureAgent` does not implement the optional
+`set_tool_guard` seam, so it inherits the base class's honest no-op and this run
+is `enforcement: detected` — every number below is a claim about the policy, not
+a record of anything being stopped. See
+[the `prevented` vs `detected` section in the README](../README.md#prevented-vs-detected--read-this-before-the-defense-rate)
+for why the two are never averaged together.
 
 **86.1%**, not 94.4%, and the difference is the point. Thirty-one attacks were
 blocked outright; three more were held for a human, who may still say yes.
@@ -210,7 +223,7 @@ Import strings resolve against the directory you run from, so `detguard` and
 setups.
 
 Then rerun steps 1–4 against your own files. Copy `detguard/policies/default.yaml`
-into your repo, fill in the four rules marked `CLIENT`, and commit it — that
+into your repo, fill in the five rules marked `CLIENT`, and commit it — that
 file is now your control documentation.
 
 ## Where to go next

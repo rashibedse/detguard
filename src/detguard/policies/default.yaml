@@ -1,7 +1,7 @@
 # detguard — default policy
 #
 # The baseline every client starts from. Copy it into your repo, fill in the
-# four rules marked CLIENT, and commit it. This file IS your control
+# five rules marked CLIENT, and commit it. This file IS your control
 # documentation: versioned, diffable, reviewed in pull requests, and enforced
 # on every commit by CI. That artifact is the thing auditors ask for and rarely
 # get.
