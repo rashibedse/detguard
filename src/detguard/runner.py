@@ -27,7 +27,7 @@ Conflating those two is how a benchmark comes to describe itself as a
 guardrail, so the summary reports which mode a run used rather than averaging
 over both.
 
-Three invariants that were real bugs before:
+Four invariants that were real bugs before:
 
 * a tool is executed exactly once, and ``ToolCall.result`` is authoritative
   forever after — nothing here re-runs a call to see what it returned;
@@ -38,6 +38,15 @@ Three invariants that were real bugs before:
 * **a redaction that fires is written back.** A masked value that is reported
   as masked and then forwarded intact is worse than no redaction at all,
   because the report says the opposite of what happened.
+* **``call_budget`` and ``repeated_call`` see the whole turn, not one call.**
+  Both reason over the decided batch — a running total, a per-tool repeat
+  count — but a *prevented* run only ever intercepts one call at a time, as
+  the agent decides it. Checking each call against a fresh one-element list
+  left both conditions structurally unable to fire under real pre-execution
+  enforcement, no matter how many calls the turn made: every call is, on its
+  own, within every limit. ``_tool_guard`` now accumulates every call decided
+  so far this turn and re-checks the whole thing on each one, which is what
+  gives a batch-scoped rule the view it needs without re-running any call.
 """
 
 from __future__ import annotations
@@ -367,10 +376,16 @@ def run_one(
     # as such, because "would have blocked" and "did block" are different
     # claims and only one of them is a guardrail.
     intercepted_calls: list = []
+    # Every call decided so far this turn, across every `_tool_guard`
+    # invocation — appended whether or not the call is then allowed, because a
+    # decided call counts toward a budget/repeat total whether or not it goes
+    # on to execute. See the module docstring's fourth invariant.
+    calls_this_turn: list = []
 
     def _tool_guard(name: str, args: dict) -> tuple[bool, str]:
         call = ToolCall(name=name, args=dict(args or {}))
-        verdict = engine.before_tool([call], policy, user_prompt=user_prompt, mode=mode)
+        calls_this_turn.append(call)
+        verdict = engine.before_tool(calls_this_turn, policy, user_prompt=user_prompt, mode=mode)
         absorb(verdict, tool=name)
         if verdict.allow:
             return True, ""
