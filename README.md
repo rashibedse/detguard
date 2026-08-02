@@ -1,6 +1,5 @@
 # DetGuard
 
-**Semgrep for AI agent tool calls.**
 
 Policy-as-code enforcement for agent tool calls, plus an adversarial regression
 suite that proves the policy still works after every change.
