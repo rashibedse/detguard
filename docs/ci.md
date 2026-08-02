@@ -33,15 +33,24 @@ Copy it into your repo. Two jobs.
 **`pr` — blocking.** PR subset, deterministic layers only, fails on a new
 breach. Fast enough that nobody resents it.
 
-**`nightly` — non-blocking.** Full corpus, `--enable-layer llm_judge`, uploads
-artifacts. Slower and probabilistic, which is exactly why it must never gate a
-merge.
+**`nightly` — non-blocking.** Full corpus, guarded and unguarded, uploads the
+delta report. Slower, which is exactly why it must never gate a merge.
 
 That split is the answer to "regression-testing a nondeterministic system is
 incoherent". It is a fair objection to a suite that runs a real model in a
 blocking gate. The blocking gate runs deterministic checks against a scripted
-agent; the real model runs nightly, where a flaky result costs somebody a look
-rather than a blocked release.
+agent, so a red build means a policy change and not model variance; anything
+slower or less repeatable runs nightly, where a flaky result costs somebody a
+look rather than a blocked release.
+
+The nightly job also passes `--enable-layer llm_judge`, and it is worth being
+exact about what that buys you today: **nothing yet.** It enables the only
+non-deterministic rule in the policy, but detguard never sets
+`registry.JUDGE_BACKEND`, so with no backend configured the rule records
+`unavailable — failed open` and changes no verdict. It is a wired-up extension
+point, not a working layer. Set `JUDGE_BACKEND` to a callable of your own
+before the flag means anything, and keep it out of the blocking gate when you
+do — that is the whole reason the deterministic/probabilistic split exists.
 
 Note there is exactly **one policy file**. The nightly run enables a layer
 inside it rather than loading a second file. Two files drift, and then the gate

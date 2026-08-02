@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import yaml
 
-from detguard.scaffold import AdapterConfig, RunConfig, build_commands, generate_workflow
+from detguard.scaffold import (
+    DETGUARD_REQUIREMENT,
+    AdapterConfig,
+    RunConfig,
+    build_commands,
+    generate_workflow,
+)
 
 
 def test_adapter_config_generic_flags():
@@ -133,3 +139,61 @@ def test_generate_workflow_uses_manifest_and_roles_paths():
     text = generate_workflow(cfg, include_nightly=False)
     assert "--manifest config/manifest.yaml" in text
     assert "--roles config/roles.yaml" in text
+
+
+def test_generated_workflow_installs_detguard_from_somewhere_it_exists():
+    """`pip install detguard` resolves to nothing — it is not on PyPI.
+
+    The generator hardcoded it anyway, so every workflow the CI tab produced
+    died on the install step before running a single attack. Nothing asserted
+    on the install lines, which is why it survived: the YAML parsed, both jobs
+    were present, and every other test passed.
+    """
+    cfg = RunConfig(adapter=AdapterConfig(kind="generic", agent="myapp.adapter:build"))
+    text = generate_workflow(cfg)
+
+    assert DETGUARD_REQUIREMENT in text
+    install_lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("pip install")]
+    assert install_lines, "the workflow installs nothing at all"
+    # The bare-name form is the bug. Anything carrying a source (a URL, a path,
+    # a -r/-e flag) is fine; `pip install detguard` on its own is not.
+    assert "pip install detguard" not in install_lines
+
+
+def test_generated_workflow_installs_client_dependencies_per_config():
+    """`pip install -e .` only works if the client's repo is a package.
+
+    Most agent repos are not, and the failure lands in the runner after a green
+    checkout. `deps` makes it the caller's choice instead of the generator's
+    assumption.
+    """
+    def installs_in(deps):
+        """Only the lines CI will actually execute — commented examples do not count."""
+        text = generate_workflow(
+            RunConfig(deps=deps, adapter=AdapterConfig(kind="generic", agent="a.b:c")),
+            include_nightly=False,
+        )
+        return [ln.strip() for ln in text.splitlines() if ln.strip().startswith("pip install")]
+
+    assert "pip install -r requirements.txt" in installs_in("requirements.txt")
+    assert "pip install -r deps/ci.txt" in installs_in("deps/ci.txt")
+    # A non-.txt value is a package root, so the editable install is right here.
+    assert "pip install -e ." in installs_in(".")
+    # Empty means "we do not know": detguard still gets installed, but nothing
+    # is guessed about the client's own deps — the suggestion stays commented.
+    blank = installs_in("")
+    assert blank == [f"pip install {DETGUARD_REQUIREMENT}"]
+
+
+def test_generated_workflow_does_not_split_credentials_across_run_modes():
+    """A key on the guarded run and not the unguarded one measures the key.
+
+    The template used to set OPENAI_API_KEY on the guarded nightly step only,
+    which reads like working config and silently makes the delta meaningless
+    for any agent that needs credentials to answer at all.
+    """
+    cfg = RunConfig(adapter=AdapterConfig(kind="generic", agent="myapp.adapter:build"))
+    doc = yaml.safe_load(generate_workflow(cfg))
+    for job in doc["jobs"].values():
+        step_envs = [s["env"] for s in job["steps"] if isinstance(s, dict) and s.get("env")]
+        assert not step_envs, f"credentials belong at job level, found step env: {step_envs}"

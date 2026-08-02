@@ -71,6 +71,21 @@ class RunConfig:
     run_dir: str = "runs/demo"
     adapter: AdapterConfig = field(default_factory=AdapterConfig)
 
+    deps: str = "requirements.txt"
+    """How the generated workflow installs the *client's own* dependencies.
+
+    A path ending ``.txt`` becomes ``pip install -r <deps>``; anything else
+    becomes ``pip install -e <deps>``, so ``"."`` gives the editable install a
+    packaged repo wants. Empty emits a commented placeholder instead of a
+    guess.
+
+    It exists because the generator used to hardcode ``pip install -e .``,
+    which only works if the client's repo is a distributable package. Most
+    agent repos are not, and the failure landed in the CI runner — after a
+    green checkout, with a message about a missing pyproject.toml that says
+    nothing about detguard.
+    """
+
     def __post_init__(self) -> None:
         """Force POSIX separators on every path.
 
@@ -81,7 +96,7 @@ class RunConfig:
         person who generated it has stopped looking. Forward slashes work on
         both, so there is no case for preserving the native separator.
         """
-        for name in ("manifest", "roles", "policy", "corpus", "run_dir"):
+        for name in ("manifest", "roles", "policy", "corpus", "run_dir", "deps"):
             setattr(self, name, str(getattr(self, name)).replace("\\", "/"))
 
 
@@ -119,7 +134,30 @@ def build_commands(cfg: RunConfig) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _install_steps() -> str:
+#: How a generated workflow installs detguard itself.
+#:
+#: Alpha, and not published to PyPI — ``pip install detguard`` resolves to
+#: nothing and the job dies on the install step. One constant, so the day it
+#: does ship to PyPI is a one-line change here rather than a hunt through
+#: generated YAML in repos nobody is going to regenerate.
+DETGUARD_REQUIREMENT = "git+https://github.com/rashibedse/detguard.git@main"
+
+
+def _deps_install_line(deps: str) -> str:
+    """The line installing the client's own dependencies. See ``RunConfig.deps``."""
+    deps = (deps or "").strip()
+    if not deps:
+        return (
+            "          # Your agent's own dependencies go here — e.g.\n"
+            "          #   pip install -r requirements.txt\n"
+            "          #   pip install -e .          # only if this repo is a package\n"
+        )
+    if deps.endswith(".txt"):
+        return f"          pip install -r {deps}\n"
+    return f"          pip install -e {deps}\n"
+
+
+def _install_steps(cfg: RunConfig) -> str:
     return (
         "      - uses: actions/checkout@v4\n\n"
         "      - uses: actions/setup-python@v5\n"
@@ -128,9 +166,24 @@ def _install_steps() -> str:
         "      - name: Install\n"
         "        run: |\n"
         "          python -m pip install --upgrade pip\n"
-        "          pip install detguard\n"
-        "          pip install -e .\n"
+        f"          pip install {DETGUARD_REQUIREMENT}\n"
+        f"{_deps_install_line(cfg.deps)}"
     )
+
+
+#: Commented rather than filled in: the generator cannot know what your agent
+#: authenticates with. Job-level on purpose — a key present on the guarded run
+#: and absent from the unguarded one yields a delta that measures the missing
+#: credential rather than the policy, which is a mistake this template shipped
+#: for a while and which reads exactly like a working gate.
+_AGENT_CREDENTIALS = (
+    "    # Uncomment if your agent needs credentials to run. Keep them at job\n"
+    "    # level so every step gets them: an agent that can authenticate for the\n"
+    "    # guarded run but not the unguarded one produces a delta that measures\n"
+    "    # the missing key, not the policy.\n"
+    "    # env:\n"
+    "    #   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
+)
 
 
 def _run_step_body(cfg: RunConfig, *, guardrail: str, run_dir: str, extra: str = "") -> str:
@@ -212,8 +265,9 @@ def generate_workflow(cfg: RunConfig, include_nightly: bool = True) -> str:
         "  pr:\n"
         "    if: github.event_name == 'pull_request'\n"
         "    runs-on: ubuntu-latest\n\n"
+        f"{_AGENT_CREDENTIALS}\n"
         "    steps:\n"
-        f"{_install_steps()}\n"
+        f"{_install_steps(cfg)}\n"
         "      - name: Rebuild corpus from the manifest\n"
         "        run: |\n"
         "          detguard corpus build \\\n"
@@ -245,22 +299,27 @@ def generate_workflow(cfg: RunConfig, include_nightly: bool = True) -> str:
         return header + pr_job
 
     nightly_job = (
-        "\n  # Non-blocking: full corpus, llm_judge enabled, uploads artifacts.\n"
+        "\n  # Non-blocking: full corpus both ways, uploads artifacts.\n"
         "  nightly:\n"
         "    if: github.event_name != 'pull_request'\n"
         "    runs-on: ubuntu-latest\n"
         "    continue-on-error: true\n\n"
+        f"{_AGENT_CREDENTIALS}\n"
         "    steps:\n"
-        f"{_install_steps()}\n"
+        f"{_install_steps(cfg)}\n"
         "      - name: Rebuild corpus\n"
         "        run: |\n"
         "          detguard corpus build \\\n"
         f"            --manifest {cfg.manifest} \\\n"
         f"            --roles {cfg.roles} \\\n"
         '            --out "$DETGUARD_CORPUS"\n\n'
-        "      - name: Full corpus, guardrail on, llm_judge enabled\n"
-        "        env:\n"
-        "          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n"
+        "      # --enable-layer llm_judge switches on the one rule in the policy\n"
+        "      # that is not deterministic. It does nothing until you wire a\n"
+        "      # backend: detguard never sets registry.JUDGE_BACKEND, so with\n"
+        "      # none configured the rule records 'unavailable - failed open'\n"
+        "      # and changes no verdict. Left on so the trace shows it was asked;\n"
+        "      # remove it if a permanently inert layer in the log annoys you.\n"
+        "      - name: Full corpus, guardrail on\n"
         f"{_nightly_run_step_body(cfg)}\n"
         f"{_run_step('Same corpus, guardrail off', cfg, guardrail='off', run_dir='runs/nightly')}\n"
         "      - name: Report with the guarded/unguarded delta\n"
