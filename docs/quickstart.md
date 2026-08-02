@@ -70,9 +70,16 @@ detguard report --results runs/demo/results-on.json \
 `--out`/`--markdown` explicitly to put them somewhere else.
 
 ```
-**1** succeeded · **30** blocked · **4** held for approval · defense rate **94.4%**
+**1** succeeded · **31** blocked · **3** held for approval · **0** mitigated · defense rate **86.1%**
+Measured **36** of 36 attacks (coverage **100.0%**)
 Enforcement prevented **34** of 35 attacks that succeed unguarded.
 ```
+
+**86.1%**, not 94.4%, and the difference is the point. Thirty-one attacks were
+blocked outright; three more were held for a human, who may still say yes.
+Those three are counted in `containment_rate` (94.4%) and deliberately kept out
+of `defense_rate` — summing them would report a maybe as a no. See
+[ci.md](ci.md) for both numbers side by side.
 
 The one that still succeeds is `TPL-12`, and the report tells you the one-line
 policy change that closes it. That finding — a real gap in *your* agent, not a
@@ -84,7 +91,40 @@ demo of ours — is the whole point.
 streamlit run dashboard/app.py
 ```
 
-Point the sidebar at the directory holding your `results-*.json`.
+Point the **Results directory** field at `runs/demo`. Three more sidebar fields
+are optional, and each one switches on a tab:
+
+| Field | Point it at | What it unlocks |
+|---|---|---|
+| Config directory | the folder holding `manifest.yaml` / `roles.yaml` / `policy.yaml` | **🛠 Coverage by tool** |
+| Baseline file | `corpus/baseline.json` | **🚦 Regression gate** |
+| Audit log | the `--audit-log` path from your run | **📜 Audit log** |
+
+They are guesses by default, and a wrong guess is harmless — the tab says what
+it could not find and every other tab keeps working.
+
+The seven tabs, and who each is for:
+
+- **📊 Overview** — the guarded/unguarded bar chart. The one chart that shows
+  what the policy actually bought you. Needs both runs loaded.
+- **🛠 Coverage by tool** — per tool: its roles, which rules reference it, how
+  it fared against the corpus, and a flag on any sensitive tool no rule covers.
+  This is the tab for deciding where you still need a guardrail, and the only
+  one that answers that from your config rather than from this run's luck.
+- **🧩 Coverage & layers** — which layer stopped what, the family × severity
+  heatmap, and which mutations survived. A single layer carrying everything is
+  a warning, not a result.
+- **🚦 Regression gate** — the same `baseline.compare()` your CI gate runs,
+  with its pass/fail verdict and exit code. Useful for seeing *why* a build
+  went red without reading the workflow log.
+- **🔍 Per-attack detail** — worst outcomes first: success check, tool calls,
+  full decision trace, final output.
+- **📜 Audit log** — every decision the engine recorded, filterable by hook,
+  tool and verdict. Empty unless you passed `--audit-log`.
+- **⬇ Export** — the filtered view as CSV.
+
+The dashboard reads files and renders them. It never invokes an agent, never
+evaluates a policy against live traffic, and never writes anything.
 
 ---
 
@@ -94,12 +134,19 @@ Record today's outcome as the baseline, and every future run is checked
 against it:
 
 ```bash
-detguard baseline snapshot --results results-on.json --out corpus/baseline.json
-detguard baseline compare --results results-on.json --baseline corpus/baseline.json
+detguard baseline snapshot --results runs/demo/results-on.json --out corpus/baseline.json
+detguard baseline compare --results runs/demo/results-on.json --baseline corpus/baseline.json
 ```
 
+Note the `runs/demo/` prefix: step 2 wrote the results there, not into the
+directory you are standing in.
+
 `compare` exits `0` when nothing regressed, `1` on a regression, `2` on a
-config error — which is all a CI gate needs. Copy
+config error, and `3` when the run could not measure enough to make a claim
+either way — which is all a CI gate needs. That fourth code matters: a flaky
+provider that leaves attacks unobserved must not look like a security
+regression, and `--allow-unmeasured` downgrades it to a warning when you have
+decided it is acceptable. Copy
 `.github/workflows/client-gate-template.yml` into your repo to wire it up.
 
 ## Point it at your own agent

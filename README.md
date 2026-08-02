@@ -53,11 +53,20 @@ OpenAI Agents SDK are thin wrappers over the same contract.
 
 ## Install
 
+Alpha, and not on PyPI yet — install from source:
+
 ```bash
-pip install detguard                 # core: pyyaml only
-pip install "detguard[dashboard]"    # + Streamlit dashboard
-pip install "detguard[langgraph]"    # + LangGraph adapter
-pip install "detguard[openai]"       # + OpenAI Agents SDK adapter
+git clone https://github.com/rashibedse/detguard && cd detguard
+pip install -e .                       # core: pyyaml only
+pip install -e ".[dashboard]"          # + Streamlit dashboard
+pip install -e ".[langgraph]"          # + LangGraph adapter
+pip install -e ".[openai]"             # + OpenAI Agents SDK adapter
+```
+
+To pin it as a dependency of your own project, name the repo directly:
+
+```
+git+https://github.com/rashibedse/detguard.git@main
 ```
 
 ## What it looks like
@@ -70,11 +79,15 @@ $ detguard run --corpus corpus/attacks --policy examples/banking_agent/policy.ya
   36 attacks · 35 breached · 0 blocked · defense rate 0.0%
 
 $ detguard run ... --guardrail on --run-dir runs/demo
-  36 attacks · 1 breached · 30 blocked · 4 held for approval · defense rate 94.4%
+  36 attacks · 1 breached · 31 blocked · 3 held for approval · defense rate 86.1%
 ```
 
-One attack still succeeds, and the report names the one-line policy change that
-closes it. That finding — a real gap in a real agent — is the deliverable. See
+Read those two numbers together. **86.1%** is the defense rate: 31 hard blocks
+out of 36. Three more attacks were held for a human, which takes the
+*containment* rate to 94.4% — reported separately, never summed into the
+headline, for the reason in the design commitments below. One attack still
+succeeds, and the report names the one-line policy change that closes it. That
+finding — a real gap in a real agent — is the deliverable. See
 [docs/quickstart.md](docs/quickstart.md) to reproduce it in five minutes.
 
 ### `prevented` vs `detected` — read this before the defense rate
@@ -108,13 +121,26 @@ Attacks are templates bound to roles, so they aim at your surface
 automatically. You do not write attacks, and we do not need to know what your
 tools do internally. Everything runs in your CI, on your infrastructure.
 
-If your agent is not on a framework DetGuard already adapts, `detguard
-scaffold` reads its source and writes the whole integration — adapter,
-manifest, roles, policy, CI workflow — validating every file before it writes
-any of them. The role classification and the adapter come from a model; the
-policy and the workflow are *derived* by rule. Enforcement is untouched: it
-still runs deterministic conditions over a file you reviewed and committed.
-See [docs/scaffold.md](docs/scaffold.md).
+On LangGraph or the OpenAI Agents SDK, `detguard init` drafts the manifest by
+introspecting the framework's own tool registry, and you never write an adapter
+at all — pass the graph or the agent object and DetGuard builds one in memory.
+
+Anywhere else, three files are yours to write: `detguard_adapter.py`,
+`manifest.yaml`, and `roles.yaml`. There is no model and no code generation
+involved, deliberately — classifying what a tool is allowed to do, and finding
+the one point in your loop where a call can be recorded without executing it
+twice, are judgements about code nobody but you has read. `detguard derive`
+then takes those three and derives `policy.yaml` plus a CI workflow from them
+*by rule*, no network call and no API key:
+
+```bash
+detguard derive --manifest config/manifest.yaml --roles config/roles.yaml \
+  --adapter-import myapp.detguard_adapter:build_adapter
+```
+
+See [docs/scaffold.md](docs/scaffold.md) for exactly which files are generated,
+derived, and neither, and [docs/integration.md](docs/integration.md) for the
+adapter contract with a worked example per framework.
 
 Two dashboards, two different jobs. `streamlit run dashboard/setup.py` is a
 config wizard — it turns manifest/roles/policy/CI into forms that validate

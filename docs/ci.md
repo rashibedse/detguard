@@ -59,9 +59,13 @@ A baseline is the known-good state: per attack, whether it succeeded, what
 stopped it, and where.
 
 ```bash
-detguard baseline snapshot --results results-on.json --out corpus/baseline.json
-detguard baseline compare --results results-on.json --baseline corpus/baseline.json
+detguard baseline snapshot --results runs/demo/results-on.json --out corpus/baseline.json
+detguard baseline compare --results runs/demo/results-on.json --baseline corpus/baseline.json
 ```
+
+Point `--results` at wherever `detguard run` actually wrote — `--run-dir
+runs/demo` puts it in `runs/demo/results-on.json`, and with no `--run-dir` at
+all it lands in a fresh `runs/<timestamp>/`.
 
 Commit it. It is a test fixture and it belongs in version control, diffed in
 pull requests like any other.
@@ -78,7 +82,14 @@ pull requests like any other.
 | `NEW_CASE` / `MISSING_CASE` | corpus membership changed | warns |
 | `POLICY_DRIFT` | the policy file changed | info |
 
-Exit codes: `0` pass, `1` regression, `2` config error.
+Exit codes: `0` pass, `1` regression, `2` config error, `3` could not measure.
+
+**Why `3` is separate from `1`.** A run that could not observe enough to make a
+claim has not regressed — it has failed to answer. The response differs too: a
+regression means somebody changed the policy or the agent and you go read the
+diff; an unmeasurable run usually means the provider was flaky and you re-run
+it. Sharing one code between them trains people to ignore both.
+`--allow-unmeasured` downgrades it to a warning.
 
 **Why `NEW_BREACH` only fails at critical and high.** A medium regression is
 real and worth seeing, but a gate that blocks merges on everything gets routed
@@ -131,7 +142,7 @@ gap and decide, in writing, that it is acceptable.
 ## The report
 
 ```bash
-detguard report --results results-on.json --unguarded results-off.json \
+detguard report --results runs/pr/results-on.json --unguarded runs/pr/results-off.json \
   --baseline corpus/baseline.json --out ci_report.json --markdown ci_report.md
 cat ci_report.md >> "$GITHUB_STEP_SUMMARY"
 ```
@@ -158,6 +169,12 @@ detguard run ... --audit-log audit.jsonl
 Append-only JSONL, one object per decision: timestamp, hook, tool, rule, layer,
 verdict, severity, reason. Off by default — a guardrail that starts writing
 logs nobody asked for is a data-retention problem wearing a helpful expression.
+
+`dashboard/app.py`'s **📜 Audit log** tab reads this file directly and filters
+it by hook, tool and verdict — point the sidebar's audit-log field at the same
+path you passed to `--audit-log`. Its **🚦 Regression gate** tab runs the same
+`compare` as above and shows the verdict and exit code, which is usually faster
+than reading a workflow log to find out why a build went red.
 
 Together with the policy file this is the compliance evidence pair: the policy
 is the control documentation, the log is proof it was enforced. Under DPDP a
