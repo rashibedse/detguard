@@ -1,0 +1,105 @@
+--- Slide 1 ---
+Policy-as-Code Enforcement for Agent Tool Calls
+Static and Dynamic Anomaly Analysis of Guardrail Policies
+Rashi Bedse
+Roll Number 13, BE A
+Department of Computer Engineering
+Thakur College of Engineering and Technology
+Guide: Ms. Sheetal Rathi
+Co-Guide: Mr. Shailesh Sangle
+--- Slide 2 ---
+Problem Statement
+01
+The field moved from models checking models to deterministic policy-as-code.
+02
+That relocated trust — it did not remove it. The policy file is now the single point of failure.
+03
+Nothing checks the policy file. No compiler, no linter, no coverage tool.
+04
+A policy that silently does nothing is indistinguishable from one that works — both report 100% defence.
+We made the guardrail auditable. We never audited it.
+--- Slide 3 ---
+Literature Survey
+Policy artifacts are analysed
+Al-Shaer 2003/05 — anomaly taxonomy
+Hu 2012 — segmentation, visualisation
+Fisler 2005 — XACML verification
+Martin 2006 — unreachable rules
+Bringhenti 2025 — SMT resolution
+single-pass rule lists
+Agent guardrails are evaluated
+ClawGuard 2026 — boundary enforcement
+AgentSpec 2025 — runtime DSL
+Progent 2025 — privilege control
+LlamaFirewall 2025 — layered runtime
+NeMo 2023 — programmable rails
+runtime accuracy only
+No work analyses the policy ruleset itself.
+--- Slide 4 ---
+System Architecture & Algorithms
+--- Slide 5 ---
+Adopted Methodology
+01
+Formalise
+hooks, ordering, semantics
+02
+Classify
+Evaluated ⊇ Fired ⊇ Attributed
+03
+Detect
+static pass + dynamic pass
+04
+Validate
+consistency + counterfactual
+CLASS
+PASS
+NOVEL
+Dead-by-logic
+Static
+—
+Inert-by-config
+Static
+—
+Redundant
+Static
+—
+Cross-hook shadowed
+Dynamic
+NEW
+Never-triggered
+Dynamic
+—
+Attribution-shadowed
+Dynamic
+NEW
+Load-bearing
+Dynamic
+—
+--- Slide 6 ---
+Performance Evaluation Parameters
+Defense Concentration Index
+DCI = Σ (attribution share)²
+N_eff = 1/DCI
+→ how few rules carry the defence
+Anomaly Class Distribution
+Rules per class: shadowed, never-triggered, attribution-shadowed, load-bearing
+→ which rules are inert, and why
+Analysis Overhead
+Time, LLM calls, API cost
+Target: sub-second, zero, zero
+→ cheap enough to run on every commit
+--- Slide 7 ---
+Software and Hardware Setup
+Software
+Python 3.13, PyYAML, pytest
+DetGuard (source install)
+openai-agents SDK, SQLite
+Streamlit, pandas, altair
+Groq API — corpus generation only
+Hardware
+ASUS Vivobook
+Windows 11
+CPU: [FILL IN]
+RAM: [FILL IN]
+No GPU
+Analysis runs offline. No GPU, no API key, no network.

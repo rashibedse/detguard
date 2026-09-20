@@ -1,0 +1,251 @@
+<title>System Architecture — Policy Anomaly Analyzer</title>
+<style>
+  :root {
+    --paper: #EEF2F5;
+    --paper-raised: #FFFFFF;
+    --ink: #1C2733;
+    --muted: #64748B;
+    --accent: #C1752B;
+    --accent-soft: #F4E3CC;
+    --rule: #D7DEE5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #0F1620;
+      --paper-raised: #161F2B;
+      --ink: #E8EDF2;
+      --muted: #8695A6;
+      --accent: #E3A25E;
+      --accent-soft: rgba(227,162,94,0.16);
+      --rule: #263241;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0F1620;
+    --paper-raised: #161F2B;
+    --ink: #E8EDF2;
+    --muted: #8695A6;
+    --accent: #E3A25E;
+    --accent-soft: rgba(227,162,94,0.16);
+    --rule: #263241;
+  }
+  :root[data-theme="light"] {
+    --paper: #EEF2F5;
+    --paper-raised: #FFFFFF;
+    --ink: #1C2733;
+    --muted: #64748B;
+    --accent: #C1752B;
+    --accent-soft: #F4E3CC;
+    --rule: #D7DEE5;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    margin: 0;
+  }
+
+  .page {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 56px 32px 72px;
+  }
+
+  .eyebrow {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: ui-serif, "Iowan Old Style", Georgia, serif;
+    font-size: clamp(28px, 3.4vw, 38px);
+    font-weight: 600;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 0 0 14px;
+  }
+
+  .dek {
+    font-size: 17px;
+    line-height: 1.6;
+    color: var(--muted);
+    max-width: 62ch;
+    margin: 0 0 40px;
+  }
+
+  .dek code, .legend code, figcaption code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    font-size: 0.92em;
+    background: var(--accent-soft);
+    color: var(--ink);
+    padding: 0.05em 0.4em;
+    border-radius: 4px;
+  }
+
+  figure {
+    margin: 0;
+    background: var(--paper-raised);
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 28px 24px 22px;
+    overflow-x: auto;
+  }
+
+  svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    min-width: 760px;
+  }
+
+  figcaption {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--muted);
+    margin-top: 18px;
+    padding-top: 16px;
+    border-top: 1px solid var(--rule);
+    max-width: 74ch;
+  }
+
+  figcaption strong { color: var(--ink); font-weight: 600; }
+
+  .svg-ink { stroke: var(--ink); }
+  .svg-muted { stroke: var(--muted); fill: none; }
+  .svg-accent { stroke: var(--accent); }
+  .fill-paper-raised { fill: var(--paper-raised); }
+  .fill-paper { fill: var(--paper); }
+  .fill-accent-soft { fill: var(--accent-soft); }
+  .fill-ink { fill: var(--ink); }
+  .fill-muted { fill: var(--muted); }
+  .fill-accent { fill: var(--accent); }
+
+  .label-mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+  }
+  .label-sans {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+</style>
+
+<div class="page">
+  <p class="eyebrow">System architecture</p>
+  <h1>A read-only side-car, not a new enforcement path</h1>
+  <p class="dek">
+    <code>detguard lint</code> is added alongside DetGuard, not inside it. It reads the two
+    artifacts the existing pipeline already produces — <code>policy.yaml</code> and
+    <code>results.json</code> — and never touches <code>engine.py</code> or <code>runner.py</code>.
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 1180 640" role="img" aria-label="Architecture diagram: a policy author writes policy.yaml, which DetGuard's unchanged four-hook engine and corpus runner consume to produce results.json. The new detguard lint tool reads policy.yaml directly for a static pass and results.json for a dynamic pass, without re-running the agent, and outputs findings and a Defense Concentration Index that feed back to the policy author, closing a loop that does not exist today.">
+      <defs>
+        <marker id="arrowMuted" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <polygon points="0,0 7,3 0,6" class="fill-muted" />
+        </marker>
+        <marker id="arrowAccent" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto" markerUnits="strokeWidth">
+          <polygon points="0,0 7,3 0,6" class="fill-accent" />
+        </marker>
+      </defs>
+
+      <!-- ============ UPPER BAND: existing DetGuard pipeline ============ -->
+
+      <!-- Policy author -->
+      <rect x="30" y="110" width="130" height="60" rx="8" class="svg-muted fill-paper" stroke-width="1.5"/>
+      <text x="95" y="135" text-anchor="middle" class="label-sans fill-ink" font-size="13" font-weight="600">Policy</text>
+      <text x="95" y="152" text-anchor="middle" class="label-sans fill-ink" font-size="13" font-weight="600">author</text>
+
+      <line x1="160" y1="140" x2="222" y2="140" class="svg-muted" stroke-width="1.5" marker-end="url(#arrowMuted)"/>
+
+      <!-- policy.yaml artifact -->
+      <rect x="224" y="110" width="140" height="60" rx="4" class="svg-muted fill-paper" stroke-width="1.5"/>
+      <text x="294" y="145" text-anchor="middle" class="label-mono fill-ink" font-size="13.5">policy.yaml</text>
+
+      <line x1="364" y1="140" x2="408" y2="140" class="svg-muted" stroke-width="1.5" marker-end="url(#arrowMuted)"/>
+
+      <!-- DetGuard core outer box -->
+      <text x="590" y="62" text-anchor="middle" class="label-sans fill-muted" font-size="12" letter-spacing="0.04em">DETGUARD CORE — UNCHANGED</text>
+      <rect x="410" y="70" width="400" height="150" rx="10" class="svg-muted fill-paper" stroke-width="1.5" stroke-dasharray="4 4"/>
+
+      <!-- mini 4-hook pipeline -->
+      <g stroke-width="1.2">
+        <rect x="432" y="130" width="72" height="38" rx="4" class="svg-muted fill-paper-raised"/>
+        <line x1="504" y1="149" x2="522" y2="149" class="svg-muted" stroke-width="1.2" marker-end="url(#arrowMuted)"/>
+        <rect x="524" y="130" width="72" height="38" rx="4" class="svg-muted fill-paper-raised"/>
+        <line x1="596" y1="149" x2="614" y2="149" class="svg-muted" stroke-width="1.2" marker-end="url(#arrowMuted)"/>
+        <rect x="616" y="130" width="72" height="38" rx="4" class="svg-muted fill-paper-raised"/>
+        <line x1="688" y1="149" x2="706" y2="149" class="svg-muted" stroke-width="1.2" marker-end="url(#arrowMuted)"/>
+        <rect x="708" y="130" width="72" height="38" rx="4" class="svg-muted fill-paper-raised"/>
+      </g>
+      <text x="590" y="200" text-anchor="middle" class="label-mono fill-muted" font-size="11">before_input → before_tool → after_tool → before_output</text>
+
+      <line x1="810" y1="140" x2="854" y2="140" class="svg-muted" stroke-width="1.5" marker-end="url(#arrowMuted)"/>
+
+      <!-- Corpus run -->
+      <rect x="856" y="110" width="150" height="60" rx="8" class="svg-muted fill-paper" stroke-width="1.5"/>
+      <text x="931" y="135" text-anchor="middle" class="label-sans fill-ink" font-size="12.5" font-weight="600">Corpus run</text>
+      <text x="931" y="152" text-anchor="middle" class="label-mono fill-muted" font-size="11">runner.py</text>
+
+      <line x1="1006" y1="140" x2="1050" y2="140" class="svg-muted" stroke-width="1.5" marker-end="url(#arrowMuted)"/>
+
+      <!-- results.json artifact -->
+      <rect x="1052" y="110" width="128" height="60" rx="4" class="svg-muted fill-paper" stroke-width="1.5"/>
+      <text x="1116" y="145" text-anchor="middle" class="label-mono fill-ink" font-size="13">results.json</text>
+
+      <!-- ============ TAPS DOWN TO NEW ANALYZER ============ -->
+
+      <path d="M 294,170 C 294,270 430,300 500,378" fill="none" class="svg-accent" stroke-width="1.6" stroke-dasharray="1 5" stroke-linecap="round" marker-end="url(#arrowAccent)"/>
+      <text x="330" y="270" class="label-sans fill-accent" font-size="12" font-weight="600">static pass</text>
+      <text x="330" y="286" class="label-sans fill-muted" font-size="11">reads policy.yaml alone</text>
+
+      <path d="M 1116,170 C 1116,280 900,320 800,378" fill="none" class="svg-accent" stroke-width="1.6" stroke-dasharray="1 5" stroke-linecap="round" marker-end="url(#arrowAccent)"/>
+      <text x="905" y="270" class="label-sans fill-accent" font-size="12" font-weight="600" text-anchor="end">dynamic pass</text>
+      <text x="905" y="286" class="label-sans fill-muted" font-size="11" text-anchor="end">existing traces — no re-run</text>
+
+      <!-- ============ NEW: detguard lint ============ -->
+
+      <rect x="440" y="380" width="300" height="86" rx="10" class="svg-accent fill-accent-soft" stroke-width="2"/>
+      <text x="590" y="418" text-anchor="middle" class="label-mono fill-ink" font-size="16" font-weight="700">detguard lint</text>
+      <text x="590" y="440" text-anchor="middle" class="label-sans fill-muted" font-size="11.5">this work — read-only, offline</text>
+
+      <line x1="590" y1="466" x2="590" y2="508" class="svg-accent" stroke-width="1.8" marker-end="url(#arrowAccent)"/>
+
+      <!-- Findings + DCI -->
+      <rect x="470" y="510" width="240" height="76" rx="10" class="svg-accent fill-paper-raised" stroke-width="2"/>
+      <text x="590" y="540" text-anchor="middle" class="label-sans fill-ink" font-size="14" font-weight="600">Findings + DCI</text>
+      <text x="590" y="558" text-anchor="middle" class="label-mono fill-muted" font-size="10.5">dead · redundant · shadowed</text>
+      <text x="590" y="572" text-anchor="middle" class="label-mono fill-muted" font-size="10.5">load-bearing</text>
+
+      <!-- Feedback loop back to policy author -->
+      <path d="M 470,548 C 220,560 40,470 70,180" fill="none" class="svg-accent" stroke-width="1.8" stroke-linecap="round" marker-end="url(#arrowAccent)"/>
+      <text x="118" y="470" class="label-sans fill-accent" font-size="12.5" font-weight="600" transform="rotate(-83 118 470)">closes the loop —</text>
+      <text x="118" y="440" class="label-sans fill-accent" font-size="12.5" font-weight="600" transform="rotate(-83 118 440)">doesn't exist today</text>
+
+      <!-- Legend -->
+      <g class="label-sans" font-size="11.5">
+        <line x1="900" y1="530" x2="932" y2="530" class="svg-muted" stroke-width="1.5"/>
+        <text x="940" y="534" class="fill-muted">existing, unchanged</text>
+        <line x1="900" y1="554" x2="932" y2="554" class="svg-accent" stroke-width="1.8" stroke-dasharray="1 5"/>
+        <text x="940" y="558" class="fill-muted">new contribution</text>
+      </g>
+    </svg>
+    <figcaption>
+      <strong>Fig. 1</strong> — <code>detguard lint</code> sits outside DetGuard's enforcement path.
+      It taps <code>policy.yaml</code> for a static, execution-free pass and the corpus runner's
+      existing <code>results.json</code> traces for a dynamic pass — no agent re-run, no LLM call.
+      Its output feeds back to the policy author, closing a verification loop that today does not exist:
+      nothing currently tells the author which of their rules are dead, redundant, or shadowed by an
+      earlier hook.
+    </figcaption>
+  </figure>
+</div>
